@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -11,10 +12,18 @@ import (
 
 type Server struct {
 	router *chi.Mux
-	db     *pgxpool.Pool
+	db     databasePinger
+}
+
+type databasePinger interface {
+	Ping(context.Context) error
 }
 
 func New(db *pgxpool.Pool) *Server {
+	return newServer(db)
+}
+
+func newServer(db databasePinger) *Server {
 	server := &Server{
 		router: chi.NewRouter(),
 		db:     db,
