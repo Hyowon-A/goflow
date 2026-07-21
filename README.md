@@ -35,6 +35,40 @@ PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams will be used to distribute executable tasks across workers.
 
+## Database Schema
+
+The initial PostgreSQL schema separates reusable workflow definitions from
+runtime execution state.
+
+![GoFlow database schema](docs/images/database-schema.png)
+
+Definition tables:
+
+- `workflows`
+- `tasks`
+- `task_dependencies`
+
+Execution tables:
+
+- `workflow_runs`
+- `task_runs`
+- `task_attempts`
+
+`workflow_runs` and `task_runs` store runtime inputs, outputs, statuses and
+timestamps. `task_attempts` stores individual retry attempts so failures are not
+overwritten by later retries.
+
+The schema uses named primary keys, unique constraints, check constraints and
+composite foreign keys to prevent invalid cross-workflow dependencies and
+mismatched task runs.
+
+Schema files:
+
+- [Initial up migration](migrations/001_initial_schema.up.sql)
+- [Initial down migration](migrations/001_initial_schema.down.sql)
+- [Schema constraint tests](internal/database/schema_constraints_test.go)
+- [ADR-001: Separate Workflow Definitions from Execution State](docs/adr/ADR-001-workflow-definitions-and-execution-runs.md)
+
 ## Project Structure
 
 ```text

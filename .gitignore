@@ -5,6 +5,9 @@ bin/
 dist/
 coverage.out
 *.test
+/docs/plan/
+.claude/
+CLAUDE.md
 
 .idea/
 .vscode/
