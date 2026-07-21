@@ -2,33 +2,54 @@ package httpserver
 
 import (
 	"context"
-	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/Hyowon-A/goflow/internal/workflow"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Server struct {
-	router *chi.Mux
-	db     databasePinger
+	router    *chi.Mux
+	db        databasePinger
+	workflows workflowService
+	logger    *slog.Logger
 }
 
 type databasePinger interface {
 	Ping(context.Context) error
 }
 
-func New(db *pgxpool.Pool) *Server {
-	return newServer(db)
+type workflowService interface {
+	CreateWorkflow(ctx context.Context, input workflow.CreateWorkflowInput) (workflow.Workflow, error)
+	CreateTask(ctx context.Context, workflowID string, input workflow.CreateTaskInput) (workflow.Task, error)
+	CreateDependency(ctx context.Context, workflowID string, input workflow.CreateDependencyInput) (workflow.Dependency, error)
+	CreateWorkflowRun(ctx context.Context, workflowID string, input workflow.CreateWorkflowRunInput) (workflow.WorkflowRun, error)
 }
 
-func newServer(db databasePinger) *Server {
-	server := &Server{
-		router: chi.NewRouter(),
-		db:     db,
+func New(db *pgxpool.Pool) *Server {
+	repo := workflow.NewPostgresRepository(db)
+	service := workflow.NewService(repo)
+
+	return newServer(db, service)
+}
+
+func newServer(db databasePinger, services ...workflowService) *Server {
+	workflows := workflowService(notImplementedWorkflowService{})
+	if len(services) > 0 {
+		workflows = services[0]
 	}
 
+	server := &Server{
+		router:    chi.NewRouter(),
+		db:        db,
+		workflows: workflows,
+		logger:    slog.Default(),
+	}
+
+	server.useMiddleware()
 	server.registerRoutes()
 
 	return server
@@ -41,6 +62,11 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) registerRoutes() {
 	s.router.Get("/health", s.health)
 	s.router.Get("/ready", s.readiness)
+
+	s.router.Post("/workflows", s.createWorkflow)
+	s.router.Post("/workflows/{workflowID}/tasks", s.createTask)
+	s.router.Post("/workflows/{workflowID}/dependencies", s.createDependency)
+	s.router.Post("/workflows/{workflowID}/runs", s.createWorkflowRun)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -63,13 +89,4 @@ func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ready",
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		http.Error(w, "failed to encode response", http.StatusInternalServerError)
-	}
 }
