@@ -87,3 +87,54 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Created `internal/database/schema_constraints_test.go`
 - Created `tests/integration/schema_constraints.sql`
 - Created `docs/adr/ADR-001-workflow-definitions-and-execution-runs.md`
+
+## Day 3
+
+### AI-assisted work
+
+- Compared Go HTTP handler, service and repository layering with a Spring Boot controller/service/repository structure
+- Reviewed request and response DTO placement for workflow API handlers
+- Designed strict JSON decoding for malformed bodies, empty bodies, unsupported content types and unknown fields
+- Added the workflow API implementation for creating workflows, tasks, dependencies and workflow runs
+- Added repository methods using `context.Context`, parameterised SQL and PostgreSQL transactions
+- Added request IDs, consistent JSON error responses and structured request logging
+- Added API integration tests against real PostgreSQL for workflow, task, dependency and run creation
+
+### Accepted suggestions
+
+- Kept HTTP request and response DTOs in the `httpserver` package
+- Added a `workflow` package for application types, service logic, domain errors and PostgreSQL persistence
+- Used repository interfaces so the service layer is not tied directly to HTTP handlers
+- Used `json.Decoder.DisallowUnknownFields` to reject unknown JSON fields
+- Created workflow runs transactionally with one pending `task_runs` row per task definition
+- Returned `409 Conflict` for duplicate task names and duplicate dependencies
+- Validated UUID path parameters before calling PostgreSQL
+- Logged each request with method, path, status, duration and request ID
+
+### Modified suggestions
+
+- Started with the real PostgreSQL repository instead of a mock repository because Day 3 validation depends on database constraints
+- Kept body DTOs small and endpoint-specific instead of creating broad shared DTO packages
+- Deferred OpenAPI/Swagger generation until the API surface is more stable
+- Deferred full dependency cycle detection because the project plan assigns DAG validation to a later day
+
+### Rejected suggestions
+
+- Rejected returning raw PostgreSQL errors from handlers because clients need stable API error codes
+- Rejected passing invalid UUID path parameters into repository methods because that turns validation errors into database failures
+- Rejected creating task attempts during workflow-run creation because attempts represent physical execution tries, not initial logical task state
+- Rejected generated handlers from an OpenAPI spec for now because it would add tooling before the API contract has settled
+
+### Validation performed
+
+- Ran `go test ./internal/httpserver -v`
+- Ran `go test ./...`
+- Verified successful workflow creation
+- Verified invalid workflow request handling
+- Verified successful task creation
+- Verified duplicate task name rejection
+- Verified successful dependency creation
+- Verified self-dependency, duplicate dependency and invalid task reference handling
+- Verified workflow-run creation creates one pending task run per task
+- Verified workflow-run creation does not create task attempts
+- Verified request IDs appear in responses and structured logs

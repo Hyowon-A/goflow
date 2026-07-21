@@ -12,6 +12,11 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - PostgreSQL integration using `pgx`
 - Local PostgreSQL setup with Docker Compose
 - Health and readiness endpoints
+- Workflow definition API endpoints
+- Task definition and dependency API endpoints
+- Workflow run creation with transactional task-run initialization
+- Consistent JSON error responses with request IDs
+- Structured request logging
 - Graceful shutdown on `Ctrl+C` and `SIGTERM`
 - Standardised development commands through a `Makefile`
 
@@ -141,6 +146,23 @@ instance on port `5433`.
 | --- | --- | --- |
 | `GET` | `/health` | Returns basic API liveness information. |
 | `GET` | `/ready` | Checks whether the API can reach PostgreSQL. |
+| `POST` | `/workflows` | Creates a reusable workflow definition. |
+| `POST` | `/workflows/{workflowID}/tasks` | Creates a task definition inside a workflow. |
+| `POST` | `/workflows/{workflowID}/dependencies` | Creates a dependency between two tasks in a workflow. |
+| `POST` | `/workflows/{workflowID}/runs` | Creates a workflow run and one pending task run per task. |
+
+API errors use a consistent JSON shape:
+
+```json
+{
+  "error": "validation_error",
+  "message": "request failed validation",
+  "request_id": "request-id"
+}
+```
+
+The API echoes `X-Request-ID` when provided and generates one when it is
+missing. Request logs include method, path, status, duration and request ID.
 
 ## Documentation
 
@@ -151,7 +173,6 @@ instance on port `5433`.
 
 ## Planned Features
 
-- Workflow definitions and execution runs
 - DAG validation and dependency scheduling
 - Redis Streams task distribution
 - Parallel worker execution
