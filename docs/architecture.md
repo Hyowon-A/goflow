@@ -60,6 +60,38 @@ task-run relationships. This lets PostgreSQL reject cross-workflow dependencies
 and task runs whose workflow run and task belong to different workflows without
 using triggers.
 
+## Execution State Automata
+
+GoFlow models three separate execution lifecycles. They share the same generic
+transition-checking helper internally, but each lifecycle has its own typed
+status values and transition table.
+
+Workflow runs represent the aggregate outcome of one workflow execution:
+
+![Workflow run state automaton](images/workflow-run-automaton.svg)
+
+Task runs represent logical task execution inside a workflow run. A task run may
+fail, wait for retry, return to the queue, or move to dead-letter state after it
+can no longer be retried.
+
+![Task run state automaton](images/task-run-automaton.svg)
+
+Task attempts represent one physical execution attempt. Attempts start when a
+worker begins execution and then end once.
+
+![Task attempt state automaton](images/task-attempt-automaton.svg)
+
+Terminal states have no outgoing transitions:
+
+- Workflow runs: `completed`, `failed`
+- Task runs: `completed`, `dead_letter`
+- Task attempts: `completed`, `failed`
+
+The workflow package rejects unknown states, same-state transitions and invalid
+state changes before repository or worker code relies on them. The Go constants
+are tested against the PostgreSQL enum definitions in
+`migrations/001_initial_schema.up.sql`.
+
 ## API Request Flow
 
 The API layer keeps HTTP concerns separate from workflow business logic and

@@ -138,3 +138,47 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Verified workflow-run creation creates one pending task run per task
 - Verified workflow-run creation does not create task attempts
 - Verified request IDs appear in responses and structured logs
+
+## Day 4
+
+### AI-assisted work
+
+- Reviewed the state model for workflow runs, logical task runs and task attempts
+- Added typed Go status constants that align with the PostgreSQL enum values
+- Added transition tables for all three lifecycles
+- Added transition validators for known-state checks, invalid transitions and terminal states
+- Added table-driven tests for valid, invalid, same-state, terminal and unknown-state transitions
+- Added enum-alignment tests that compare Go constants with the initial PostgreSQL migration
+- Refactored duplicated transition validation into a private generic state-machine helper
+
+### Accepted suggestions
+
+- Kept workflow-run, task-run and task-attempt statuses as separate Go types
+- Used `completed` instead of `success` because the database schema already uses `completed`
+- Made `completed`, `failed` and `dead_letter` terminal only in the lifecycles where they apply
+- Used private generic code for shared transition mechanics while preserving lifecycle-specific public functions
+- Added distinct unknown-status errors for workflow runs, task runs and task attempts
+- Kept transition logic inside the `workflow` package instead of HTTP handlers or PostgreSQL repository code
+
+### Modified suggestions
+
+- Started with pure in-memory transition validation and deferred repository update methods until worker and scheduler code need them
+- Kept the generic helper unexported so callers still use domain-specific functions such as `ValidateTaskRunTransition`
+- Treated empty transition maps as the source of truth for terminal states instead of maintaining separate terminal-state lists
+
+### Rejected suggestions
+
+- Rejected one shared status type because the three lifecycles allow different states and transitions
+- Rejected `SUCCESS` as the terminal task-run name because it would drift from the existing `completed` database enum
+- Rejected allowing same-state transitions by default because retries and duplicate messages should be handled explicitly
+- Rejected exposing a generic public state-machine API because it would make callers responsible for lifecycle selection
+
+### Validation performed
+
+- Ran `gofmt` on the workflow state-machine files
+- Ran `go test ./internal/workflow`
+- Ran `go test ./...`
+- Verified task-run transition tests cover valid, invalid, terminal, same-state and unknown-state cases
+- Verified workflow-run transition tests cover valid, invalid, terminal, same-state and unknown-state cases
+- Verified task-attempt transition tests cover valid, invalid, terminal, same-state and unknown-state cases
+- Verified Go status constants align with `workflow_run_status`, `task_run_status` and `task_attempt_status` in `migrations/001_initial_schema.up.sql`

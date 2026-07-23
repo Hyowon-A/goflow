@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" width="760" height="260" role="img" aria-labelledby="ta-title ta-desc">
+  <title id="ta-title">Task attempt state automaton</title>
+  <desc id="ta-desc">States: running, completed, failed. running transitions to completed or failed. completed and failed are terminal states with no outgoing transitions.</desc>
+  <style>
+    .node-fill { fill: #f6f7f9; }
+    .node-border { stroke: #24292f; stroke-width: 1.8; }
+    .terminal-outer { fill: none; stroke: #24292f; stroke-width: 1.4; }
+    .text { fill: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; text-anchor: middle; }
+    .caption { fill: #57606a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; }
+    .edge { stroke: #57606a; stroke-width: 1.6; fill: none; }
+    .edge-fill { fill: #57606a; }
+    @media (prefers-color-scheme: dark) {
+      .node-fill { fill: #2d333b; }
+      .node-border { stroke: #adbac7; }
+      .terminal-outer { stroke: #adbac7; }
+      .text { fill: #cdd9e5; }
+      .caption { fill: #909dab; }
+      .edge { stroke: #909dab; }
+      .edge-fill { fill: #909dab; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="edge-fill"/>
+    </marker>
+  </defs>
+
+  <path d="M220,112 Q335,70 456,58" class="edge" marker-end="url(#arrow)"/>
+  <path d="M220,138 Q335,180 456,202" class="edge" marker-end="url(#arrow)"/>
+
+  <rect x="80" y="100" width="140" height="50" rx="10" class="node-fill node-border"/>
+  <text x="150" y="130" class="text">RUNNING</text>
+
+  <rect x="456" y="26" width="168" height="58" rx="12" class="terminal-outer"/>
+  <rect x="462" y="32" width="156" height="46" rx="9" class="node-fill node-border"/>
+  <text x="540" y="60" class="text">COMPLETED</text>
+
+  <rect x="456" y="176" width="148" height="58" rx="12" class="terminal-outer"/>
+  <rect x="462" y="182" width="136" height="46" rx="9" class="node-fill node-border"/>
+  <text x="530" y="210" class="text">FAILED</text>
+
+  <text x="20" y="248" class="caption">Double border = terminal state (no outgoing transitions)</text>
+</svg>

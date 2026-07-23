@@ -15,6 +15,7 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Workflow definition API endpoints
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
+- Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
 - Structured request logging
 - Graceful shutdown on `Ctrl+C` and `SIGTERM`
@@ -66,6 +67,27 @@ overwritten by later retries.
 The schema uses named primary keys, unique constraints, check constraints and
 composite foreign keys to prevent invalid cross-workflow dependencies and
 mismatched task runs.
+
+## State Transition Automata
+
+GoFlow keeps workflow-run, task-run and task-attempt lifecycles separate. The
+state-machine implementation is in `internal/workflow/state_machine.go`.
+
+Workflow run:
+
+![Workflow run state automaton](docs/images/workflow-run-automaton.svg)
+
+Task run:
+
+![Task run state automaton](docs/images/task-run-automaton.svg)
+
+Task attempt:
+
+![Task attempt state automaton](docs/images/task-attempt-automaton.svg)
+
+Terminal states have no outgoing transitions. Same-state transitions and
+unknown states are rejected by the workflow package before persistence or worker
+logic can depend on them.
 
 Schema files:
 
