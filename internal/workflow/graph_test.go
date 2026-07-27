@@ -49,6 +49,144 @@ func TestNewWorkflowGraphBuildsAdjacencyListAndInDegree(t *testing.T) {
 	}
 }
 
+func TestNewWorkflowGraphSingleTaskWorkflow(t *testing.T) {
+	graph, err := NewWorkflowGraph([]string{"A"}, nil)
+	if err != nil {
+		t.Fatalf("build workflow graph: %v", err)
+	}
+
+	wantOutgoing := map[string][]string{"A": nil}
+	if !reflect.DeepEqual(graph.Outgoing, wantOutgoing) {
+		t.Fatalf("unexpected outgoing edges: got %#v, want %#v", graph.Outgoing, wantOutgoing)
+	}
+	wantInDegree := map[string]int{"A": 0}
+	if !reflect.DeepEqual(graph.InDegree, wantInDegree) {
+		t.Fatalf("unexpected in-degree counts: got %#v, want %#v", graph.InDegree, wantInDegree)
+	}
+	if !reflect.DeepEqual(graph.RootTaskIDs, []string{"A"}) {
+		t.Fatalf("unexpected root task IDs: got %#v", graph.RootTaskIDs)
+	}
+	if !reflect.DeepEqual(graph.LeafTaskIDs, []string{"A"}) {
+		t.Fatalf("unexpected leaf task IDs: got %#v", graph.LeafTaskIDs)
+	}
+}
+
+func TestNewWorkflowGraphLinearGraph(t *testing.T) {
+	graph, err := NewWorkflowGraph(
+		[]string{"A", "B", "C"},
+		[]DependencyEdge{
+			{PredecessorTaskID: "A", SuccessorTaskID: "B"},
+			{PredecessorTaskID: "B", SuccessorTaskID: "C"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build workflow graph: %v", err)
+	}
+
+	wantOutgoing := map[string][]string{
+		"A": {"B"},
+		"B": {"C"},
+		"C": nil,
+	}
+	if !reflect.DeepEqual(graph.Outgoing, wantOutgoing) {
+		t.Fatalf("unexpected outgoing edges: got %#v, want %#v", graph.Outgoing, wantOutgoing)
+	}
+	wantInDegree := map[string]int{"A": 0, "B": 1, "C": 1}
+	if !reflect.DeepEqual(graph.InDegree, wantInDegree) {
+		t.Fatalf("unexpected in-degree counts: got %#v, want %#v", graph.InDegree, wantInDegree)
+	}
+	if !reflect.DeepEqual(graph.RootTaskIDs, []string{"A"}) {
+		t.Fatalf("unexpected root task IDs: got %#v", graph.RootTaskIDs)
+	}
+	if !reflect.DeepEqual(graph.LeafTaskIDs, []string{"C"}) {
+		t.Fatalf("unexpected leaf task IDs: got %#v", graph.LeafTaskIDs)
+	}
+}
+
+func TestNewWorkflowGraphFanOutGraph(t *testing.T) {
+	graph, err := NewWorkflowGraph(
+		[]string{"A", "B", "C"},
+		[]DependencyEdge{
+			{PredecessorTaskID: "A", SuccessorTaskID: "C"},
+			{PredecessorTaskID: "A", SuccessorTaskID: "B"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build workflow graph: %v", err)
+	}
+
+	wantOutgoing := map[string][]string{
+		"A": {"B", "C"},
+		"B": nil,
+		"C": nil,
+	}
+	if !reflect.DeepEqual(graph.Outgoing, wantOutgoing) {
+		t.Fatalf("unexpected outgoing edges: got %#v, want %#v", graph.Outgoing, wantOutgoing)
+	}
+	wantInDegree := map[string]int{"A": 0, "B": 1, "C": 1}
+	if !reflect.DeepEqual(graph.InDegree, wantInDegree) {
+		t.Fatalf("unexpected in-degree counts: got %#v, want %#v", graph.InDegree, wantInDegree)
+	}
+	if !reflect.DeepEqual(graph.RootTaskIDs, []string{"A"}) {
+		t.Fatalf("unexpected root task IDs: got %#v", graph.RootTaskIDs)
+	}
+	if !reflect.DeepEqual(graph.LeafTaskIDs, []string{"B", "C"}) {
+		t.Fatalf("unexpected leaf task IDs: got %#v", graph.LeafTaskIDs)
+	}
+}
+
+func TestNewWorkflowGraphFanInGraph(t *testing.T) {
+	graph, err := NewWorkflowGraph(
+		[]string{"A", "B", "C"},
+		[]DependencyEdge{
+			{PredecessorTaskID: "B", SuccessorTaskID: "C"},
+			{PredecessorTaskID: "A", SuccessorTaskID: "C"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build workflow graph: %v", err)
+	}
+
+	wantOutgoing := map[string][]string{
+		"A": {"C"},
+		"B": {"C"},
+		"C": nil,
+	}
+	if !reflect.DeepEqual(graph.Outgoing, wantOutgoing) {
+		t.Fatalf("unexpected outgoing edges: got %#v, want %#v", graph.Outgoing, wantOutgoing)
+	}
+	wantInDegree := map[string]int{"A": 0, "B": 0, "C": 2}
+	if !reflect.DeepEqual(graph.InDegree, wantInDegree) {
+		t.Fatalf("unexpected in-degree counts: got %#v, want %#v", graph.InDegree, wantInDegree)
+	}
+	if !reflect.DeepEqual(graph.RootTaskIDs, []string{"A", "B"}) {
+		t.Fatalf("unexpected root task IDs: got %#v", graph.RootTaskIDs)
+	}
+	if !reflect.DeepEqual(graph.LeafTaskIDs, []string{"C"}) {
+		t.Fatalf("unexpected leaf task IDs: got %#v", graph.LeafTaskIDs)
+	}
+}
+
+func TestNewWorkflowGraphAllowsDisconnectedComponents(t *testing.T) {
+	graph, err := NewWorkflowGraph(
+		[]string{"D", "B", "A", "C"},
+		[]DependencyEdge{
+			{PredecessorTaskID: "C", SuccessorTaskID: "D"},
+			{PredecessorTaskID: "A", SuccessorTaskID: "B"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build workflow graph: %v", err)
+	}
+
+	if !reflect.DeepEqual(graph.RootTaskIDs, []string{"A", "C"}) {
+		t.Fatalf("unexpected root task IDs: got %#v", graph.RootTaskIDs)
+	}
+	if !reflect.DeepEqual(graph.LeafTaskIDs, []string{"B", "D"}) {
+		t.Fatalf("unexpected leaf task IDs: got %#v", graph.LeafTaskIDs)
+	}
+}
+
 func TestNewWorkflowGraphSortsOutput(t *testing.T) {
 	graph, err := NewWorkflowGraph(
 		[]string{"C", "A", "D", "B"},

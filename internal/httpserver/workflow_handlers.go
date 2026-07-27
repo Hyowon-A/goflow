@@ -240,6 +240,8 @@ func writeWorkflowError(w http.ResponseWriter, requestID string, err error) {
 		writeError(w, http.StatusConflict, "duplicate_dependency", "dependency already exists", requestID)
 	case errors.Is(err, workflow.ErrSelfDependency):
 		writeError(w, http.StatusBadRequest, "self_dependency", "a task cannot depend on itself", requestID)
+	case errors.Is(err, workflow.ErrDependencyCycle):
+		writeError(w, http.StatusBadRequest, "dependency_cycle", "dependency would create a cycle", requestID)
 	case errors.Is(err, workflow.ErrEmptyWorkflow):
 		writeError(w, http.StatusBadRequest, "empty_workflow", "workflow must contain at least one task before a run can be created", requestID)
 	case errors.Is(err, workflow.ErrValidation):

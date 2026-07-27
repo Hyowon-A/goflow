@@ -538,6 +538,54 @@ func TestDependencyAPIDuplicateDependency(t *testing.T) {
 	expectFieldEquals(t, responseBody, "error", "duplicate_dependency")
 }
 
+func TestDependencyAPICycleValidation(t *testing.T) {
+	pool, handler := workflowAPIHandler(t)
+
+	workflowName := uniqueWorkflowName("day5-dependency-cycle")
+	cleanupWorkflowByName(t, pool, workflowName)
+
+	workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+	extractID := createTaskThroughAPI(t, handler, workflowID, "extract")
+	transformID := createTaskThroughAPI(t, handler, workflowID, "transform")
+	loadID := createTaskThroughAPI(t, handler, workflowID, "load")
+
+	response := postJSON(t, handler, "/workflows/"+workflowID+"/dependencies", map[string]any{
+		"predecessor_task_id": extractID,
+		"successor_task_id":   transformID,
+	}, "")
+	expectStatus(t, response, http.StatusCreated)
+
+	response = postJSON(t, handler, "/workflows/"+workflowID+"/dependencies", map[string]any{
+		"predecessor_task_id": transformID,
+		"successor_task_id":   extractID,
+	}, "dependency-cycle-request")
+	expectStatus(t, response, http.StatusBadRequest)
+	expectJSONResponse(t, response)
+	expectRequestIDHeader(t, response, "dependency-cycle-request")
+
+	body := decodeJSONBody(t, response)
+	expectFieldEquals(t, body, "error", "dependency_cycle")
+	expectFieldEquals(t, body, "request_id", "dependency-cycle-request")
+
+	response = postJSON(t, handler, "/workflows/"+workflowID+"/dependencies", map[string]any{
+		"predecessor_task_id": transformID,
+		"successor_task_id":   loadID,
+	}, "")
+	expectStatus(t, response, http.StatusCreated)
+
+	response = postJSON(t, handler, "/workflows/"+workflowID+"/dependencies", map[string]any{
+		"predecessor_task_id": loadID,
+		"successor_task_id":   extractID,
+	}, "dependency-long-cycle-request")
+	expectStatus(t, response, http.StatusBadRequest)
+	expectJSONResponse(t, response)
+	expectRequestIDHeader(t, response, "dependency-long-cycle-request")
+
+	body = decodeJSONBody(t, response)
+	expectFieldEquals(t, body, "error", "dependency_cycle")
+	expectFieldEquals(t, body, "request_id", "dependency-long-cycle-request")
+}
+
 func TestWorkflowRunAPIContract(t *testing.T) {
 	pool, handler := workflowAPIHandler(t)
 

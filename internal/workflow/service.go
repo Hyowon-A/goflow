@@ -48,9 +48,14 @@ func (s *Service) CreateTask(ctx context.Context, workflowID string, input Creat
 
 func (s *Service) CreateDependency(ctx context.Context, workflowID string, input CreateDependencyInput) (Dependency, error) {
 	workflowID = strings.TrimSpace(workflowID)
+	input.PredecessorTaskID = strings.TrimSpace(input.PredecessorTaskID)
+	input.SuccessorTaskID = strings.TrimSpace(input.SuccessorTaskID)
 
 	if workflowID == "" {
 		return Dependency{}, ErrWorkflowNotFound
+	}
+	if input.PredecessorTaskID == "" || input.SuccessorTaskID == "" {
+		return Dependency{}, ErrValidation
 	}
 
 	return s.repo.CreateDependency(ctx, workflowID, input)
