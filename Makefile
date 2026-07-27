@@ -1,4 +1,4 @@
-.PHONY: postgres-up postgres-down api worker test fmt vet check # Tells make that these names are commands, not files.
+.PHONY: postgres-up postgres-down redis-up api worker test fmt vet check # Tells make that these names are commands, not files.
 
 postgres-up:
 	docker compose up -d postgres
@@ -22,3 +22,6 @@ vet:
 	go vet ./...
 
 check: fmt vet test
+
+redis-up:
+	docker compose up -d redis

@@ -7,16 +7,20 @@ import (
 )
 
 type Config struct {
-	AppEnv      string
-	HTTPPort    string
-	DatabaseURL string
+	AppEnv          string
+	HTTPPort        string
+	DatabaseURL     string
+	RedisAddr       string
+	QueueStreamName string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:      getEnv("APP_ENV", "development"),
-		HTTPPort:    getEnv("HTTP_PORT", "8080"),
-		DatabaseURL: os.Getenv("DATABASE_URL"), // returns an empty string when the variable is missing
+		AppEnv:          getEnv("APP_ENV", "development"),
+		HTTPPort:        getEnv("HTTP_PORT", "8080"),
+		DatabaseURL:     os.Getenv("DATABASE_URL"), // returns an empty string when the variable is missing
+		RedisAddr:       getEnv("REDIS_ADDR", "localhost:6379"),
+		QueueStreamName: getEnv("QUEUE_STREAM_NAME", "goflow:tasks"),
 	}
 
 	if cfg.DatabaseURL == "" {
