@@ -10,7 +10,8 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Separate API and worker applications
 - Environment-based configuration
 - PostgreSQL integration using `pgx`
-- Local PostgreSQL setup with Docker Compose
+- Local PostgreSQL and Redis setup with Docker Compose
+- Redis Streams task publisher
 - Health and readiness endpoints
 - Workflow definition API endpoints
 - Task definition and dependency API endpoints
@@ -40,7 +41,9 @@ GoFlow API
 
 PostgreSQL is the source of truth for workflow and task state.
 
-Redis Streams will be used to distribute executable tasks across workers.
+Redis Streams is the task-delivery boundary. The current implementation can
+publish task messages to a configured stream; worker consumption and scheduler
+publishing are planned later.
 
 ## Database Schema
 
@@ -130,9 +133,8 @@ internal/
   config/
   database/
   httpserver/
+  queue/
   workflow/
-  task/
-  worker/
 
 docs/
 migrations/
@@ -147,10 +149,11 @@ Create the local environment file:
 cp .env.example .env
 ```
 
-Start PostgreSQL:
+Start local infrastructure:
 
 ```sh
 make postgres-up
+make redis-up
 ```
 
 Start the API:
@@ -181,9 +184,11 @@ values can be provided through `.env`.
 | `APP_ENV` | No | `development` | Runtime environment name. |
 | `HTTP_PORT` | No | `8080` | API listen port. |
 | `DATABASE_URL` | Yes | None | PostgreSQL connection string. |
+| `REDIS_ADDR` | No | `localhost:6379` | Redis address used by the queue publisher. |
+| `QUEUE_STREAM_NAME` | No | `goflow:tasks` | Redis stream used for task messages. |
 
 The provided `.env.example` points at the local Docker Compose PostgreSQL
-instance on port `5433`.
+instance on port `5433` and Redis on port `6379`.
 
 ## API Endpoints
 
@@ -215,11 +220,12 @@ missing. Request logs include method, path, status, duration and request ID.
 - [Failure model](docs/failure-model.md)
 - [Test strategy](docs/test-strategy.md)
 - [AI-assisted development](docs/ai-assisted-development.md)
+- [ADR-002: Use Redis Streams for the Initial Task Queue](docs/adr/ADR-002-redis-streams-task-queue.md)
 
 ## Planned Features
 
 - Dependency scheduling
-- Redis Streams task distribution
+- Redis Streams worker consumption
 - Parallel worker execution
 - Idempotent workflow and task processing
 - Retry with exponential backoff
@@ -233,7 +239,8 @@ missing. Request logs include method, path, status, duration and request ID.
 ## Development Principles
 
 - PostgreSQL is the authoritative source of workflow state.
-- Task delivery will use at-least-once semantics.
+- Redis Streams carries task-delivery messages, not authoritative workflow state.
+- Task delivery uses at-least-once semantics.
 - Duplicate delivery must not create duplicate logical side effects.
 - Failure handling must be observable and testable.
 - Architectural decisions should be documented through ADRs.

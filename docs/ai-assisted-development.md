@@ -228,3 +228,50 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./...`
 - Verified graph tests cover single-task, linear, fan-out, fan-in, diamond, disconnected, invalid-reference and cycle cases
 - Verified dependency cycle errors map to stable API error code `dependency_cycle`
+
+## Day 6
+
+### AI-assisted work
+
+- Planned the queue boundary before wiring scheduler or worker behavior
+- Compared Redis Streams, Redis Pub/Sub, RabbitMQ and Asynq for the initial queue layer
+- Added a small `queue.Queue` interface for task publishing
+- Added a task message schema with stable Redis field names
+- Added Redis queue configuration and local Docker Compose support
+- Implemented a Redis Streams publisher using `XADD`
+- Added unit tests for queue config and message serialization
+- Added a Redis integration test that skips clearly when Redis is unavailable
+
+### Accepted suggestions
+
+- Used Redis Streams as the initial backend because it supports durable stream entries, consumer groups for later workers and local Docker simplicity
+- Used `github.com/redis/go-redis/v9` because it is a mature Go client with context-aware APIs
+- Kept PostgreSQL as the source of truth and Redis as task delivery infrastructure
+- Returned the Redis stream message ID from `PublishTask`
+- Kept Redis client types out of the queue interface
+- Added `REDIS_ADDR` and `QUEUE_STREAM_NAME` configuration
+
+### Modified suggestions
+
+- Considered Asynq, but deferred it because GoFlow still needs explicit workflow state transitions and queue semantics; direct Redis Streams keeps the Day 6 boundary small
+- Kept publishing limited to the queue package instead of wiring workflow-run creation to Redis immediately
+- Documented the future dual-write failure window instead of claiming transactional outbox behavior before it exists
+
+### Rejected suggestions
+
+- Rejected Redis Pub/Sub because messages disappear when consumers are unavailable
+- Rejected RabbitMQ for Day 6 because it adds operational scope before worker consumption exists
+- Rejected implementing worker consumers, acknowledgement, claiming, leases, retries, dead-letter handling or scheduler dependency release during Day 6
+- Rejected putting full task configuration, secrets or large payloads into Redis messages
+
+### Validation performed
+
+- Ran `go mod tidy`
+- Started Redis with `docker compose up -d redis`
+- Ran `go test ./internal/queue -count=1 -v`
+- Ran `go test ./internal/config -v`
+- Ran `go test ./internal/workflow -v`
+- Ran `go test ./internal/httpserver -v`
+- Ran `go test ./...`
+- Ran `make check`
+- Verified the Redis integration test publishes multiple stream entries with the expected fields

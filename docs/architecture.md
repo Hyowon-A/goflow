@@ -224,3 +224,48 @@ turn database failures into stable API errors, including duplicate task names,
 duplicate dependencies, missing workflows and invalid task references.
 Dependency cycle validation returns a stable `dependency_cycle` error with
 `400 Bad Request`.
+
+## Task Queue
+
+GoFlow uses Redis Streams as the initial task-delivery boundary. PostgreSQL
+remains the authoritative store for workflow definitions, workflow runs, task
+runs, task attempts, statuses, inputs and outputs. Redis messages are delivery
+records that carry enough identifiers for later worker code to load the
+authoritative state from PostgreSQL.
+
+The queue package currently exposes a small publishing boundary:
+
+```go
+type Queue interface {
+	PublishTask(ctx context.Context, message TaskMessage) (string, error)
+}
+```
+
+The Redis implementation owns one Redis client per publisher and appends
+messages with `XADD` to the configured stream. The returned value is the Redis
+stream message ID.
+
+Task message fields are stable and explicit:
+
+| Field | Purpose |
+| --- | --- |
+| `schema_version` | Message schema version. Currently `1`. |
+| `workflow_id` | Workflow definition ID. |
+| `workflow_run_id` | Workflow run ID. |
+| `task_id` | Task definition ID. |
+| `task_run_id` | Logical task run ID. |
+
+The queue intentionally does not embed full task configuration, input payloads
+or secrets. Workers should use the IDs in the message to load the current task
+state and payload references from PostgreSQL.
+
+Delivery semantics are at least once. Later consumers must be idempotent because
+Redis may redeliver messages after consumer failures or acknowledgement gaps.
+Acknowledgement, claiming, retry leases, dead-letter handling and worker
+execution are outside the current publisher implementation.
+
+The current workflow service does not publish root task runs when creating a
+workflow run. When publishing is wired into workflow-run creation, publishing
+must happen after the database transaction commits unless a transactional
+outbox is introduced. Until an outbox exists, GoFlow must not claim atomic
+database update plus Redis publish guarantees.

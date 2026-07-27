@@ -28,6 +28,20 @@ same-workflow foreign keys, timestamp checks and attempt-number checks.
 Workflow API integration tests also run against PostgreSQL. They verify that the
 HTTP API, workflow service and repository work together correctly.
 
+### Redis queue tests
+
+Queue unit tests cover configuration validation, task message validation and
+deterministic message field serialization.
+
+Redis Streams integration tests run against real Redis when it is available at
+the configured local address. They publish task messages through the
+`RedisStreamPublisher`, read the stream back, and verify:
+
+- a Redis stream message ID is returned
+- each message is appended instead of overwritten
+- stream payload fields match the task message schema
+- tests skip clearly when Redis is not running
+
 ## Current Coverage
 
 - `GET /health`
@@ -53,6 +67,9 @@ HTTP API, workflow service and repository work together correctly.
 - Structured request logging
 - Transactional workflow-run creation with pending task runs
 - Transactional dependency creation with graph validation before insert
+- Queue configuration defaults and validation
+- Task queue message schema validation
+- Redis Streams publisher integration with real Redis when available
 
 ## Validation Commands
 
@@ -80,11 +97,25 @@ Run the workflow graph and state-machine tests:
 go test ./internal/workflow -v
 ```
 
+Run the queue tests:
+
+```sh
+go test ./internal/queue -v
+```
+
 Some integration tests require local PostgreSQL. Start it with:
 
 ```sh
 make postgres-up
 ```
+
+Redis queue integration tests run when Redis is available. Start it with:
+
+```sh
+make redis-up
+```
+
+If Redis is not running, the Redis integration test skips with a clear message.
 
 ## Testing Principles
 
@@ -99,3 +130,5 @@ make postgres-up
   without database setup.
 - Use PostgreSQL-backed API integration tests for dependency behavior that
   depends on transactions, locks or database constraints.
+- Keep queue message serialization tests independent of Redis.
+- Use real Redis for publisher behavior so the tests prove the `XADD` boundary.
