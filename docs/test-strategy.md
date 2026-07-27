@@ -14,6 +14,11 @@ Handler tests cover API behavior that does not require a real database, such as
 health checks, readiness checks, JSON decoding, request IDs and structured
 logging.
 
+Workflow unit tests cover pure graph behavior without PostgreSQL. They prove
+adjacency-list construction, in-degree counts, deterministic roots and leaves,
+valid single-task, linear, fan-out, fan-in, diamond and disconnected graphs, and
+cycle rejection.
+
 ### PostgreSQL integration tests
 
 Database tests run against real PostgreSQL. They prove schema constraints such
@@ -38,10 +43,16 @@ HTTP API, workflow service and repository work together correctly.
 - Invalid task references
 - Duplicate task names
 - Duplicate dependencies
+- Workflow graph construction
+- Deterministic graph root and leaf ordering
+- Dependency cycle rejection
+- Disconnected workflow graph components
+- Dependency cycle API error mapping
 - Empty workflow runs
 - Request ID response headers and error bodies
 - Structured request logging
 - Transactional workflow-run creation with pending task runs
+- Transactional dependency creation with graph validation before insert
 
 ## Validation Commands
 
@@ -63,6 +74,12 @@ Run the database constraint tests:
 go test ./internal/database -v
 ```
 
+Run the workflow graph and state-machine tests:
+
+```sh
+go test ./internal/workflow -v
+```
+
 Some integration tests require local PostgreSQL. Start it with:
 
 ```sh
@@ -78,3 +95,7 @@ make postgres-up
 - Prove failure cases, not only successful paths.
 - Add broader integration tests when a change crosses handler, service and
   repository boundaries.
+- Keep pure graph tests independent of PostgreSQL so scheduling logic can evolve
+  without database setup.
+- Use PostgreSQL-backed API integration tests for dependency behavior that
+  depends on transactions, locks or database constraints.

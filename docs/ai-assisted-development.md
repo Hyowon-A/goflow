@@ -182,3 +182,49 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Verified workflow-run transition tests cover valid, invalid, terminal, same-state and unknown-state cases
 - Verified task-attempt transition tests cover valid, invalid, terminal, same-state and unknown-state cases
 - Verified Go status constants align with `workflow_run_status`, `task_run_status` and `task_attempt_status` in `migrations/001_initial_schema.up.sql`
+
+## Day 5
+
+### AI-assisted work
+
+- Reviewed workflow dependency validation requirements before scheduler logic depends on them
+- Added a workflow graph type with task IDs, outgoing adjacency lists, in-degree counts, root tasks and leaf tasks
+- Added deterministic graph output by sorting successor lists, root task IDs and leaf task IDs
+- Added cycle detection with Kahn's algorithm
+- Added dependency creation validation so cyclic edges are rejected before insertion
+- Added transaction-scoped PostgreSQL graph reads for dependency creation
+- Added API error mapping for dependency cycles
+- Added graph, service and API tests for Day 5 behavior
+
+### Accepted suggestions
+
+- Represented dependencies as predecessor-to-successor edges
+- Kept graph construction and cycle detection in the `workflow` package, independent of HTTP handlers
+- Used Kahn's algorithm instead of recursive DFS because it naturally uses in-degree counts and produces deterministic traversal when roots are sorted
+- Allowed disconnected workflow components and tested that each component root is returned
+- Kept PostgreSQL constraints as the first line of defense for same-workflow references, self-dependencies and duplicate dependency rows
+- Used application-level graph validation for dependency cycles because PostgreSQL constraints do not express transitive graph acyclicity cleanly
+- Wrapped workflow-row locking, graph reads, graph validation and dependency insertion in one transaction
+
+### Modified suggestions
+
+- Initially considered public repository methods for loading graph task IDs and dependency edges
+- Moved those reads into private transaction-scoped repository helpers so graph validation and insertion share the same locked transaction
+- Kept dependency validation on creation rather than adding a separate public service method, because the current API only needs immediate rejection of invalid edges
+- Added API integration coverage for cycle errors while still allowing the tests to skip when local PostgreSQL is unavailable
+
+### Rejected suggestions
+
+- Rejected PostgreSQL recursive queries for Day 5 because the Go implementation is small, pure and easy to unit test
+- Rejected keeping graph-loading reads in the public service repository interface after dependency creation became transactional
+- Rejected relying only on self-dependency and foreign-key constraints because longer cycles require graph traversal
+- Rejected adding Redis Streams, worker execution, retries, leases, outbox publishing or executor logic during Day 5
+
+### Validation performed
+
+- Ran `gofmt` on updated Go files
+- Ran `go test ./internal/workflow -v`
+- Ran `go test ./internal/httpserver -v`
+- Ran `go test ./...`
+- Verified graph tests cover single-task, linear, fan-out, fan-in, diamond, disconnected, invalid-reference and cycle cases
+- Verified dependency cycle errors map to stable API error code `dependency_cycle`

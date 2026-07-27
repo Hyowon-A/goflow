@@ -60,6 +60,63 @@ task-run relationships. This lets PostgreSQL reject cross-workflow dependencies
 and task runs whose workflow run and task belong to different workflows without
 using triggers.
 
+## Workflow Graph Validation
+
+Workflow definitions are modeled as directed acyclic graphs. Tasks are graph
+nodes and `task_dependencies` rows are directed edges from predecessor task to
+successor task.
+
+```text
+extract
+  |
+  v
+transform
+  |
+  v
+load
+```
+
+Fan-out, fan-in, multiple roots, multiple leaves and disconnected components are
+valid. Disconnected components are treated as separate runnable branches of the
+same workflow definition.
+
+```text
+extract        enrich
+  |              |
+  v              v
+transform      publish
+
+aggregate ----> notify
+```
+
+Graph invariants:
+
+- Every dependency edge must reference tasks in the same workflow.
+- A task cannot depend on itself.
+- Duplicate dependency edges are invalid.
+- A valid workflow graph must be acyclic.
+- A non-empty workflow must have at least one root task.
+- Every task in a valid graph is reachable from at least one root task in its
+  component.
+
+The workflow package builds graphs from task IDs and dependency edges using an
+adjacency list plus in-degree counts. Roots and leaves are sorted so later
+scheduler logic can consume deterministic output. Cycle detection uses Kahn's
+algorithm: start from zero in-degree tasks, visit successors while decrementing
+their in-degree and reject the graph if the visited count is smaller than the
+task count.
+
+Dependency creation validates the graph before inserting the new edge. The
+PostgreSQL repository wraps workflow-row locking, graph reads, graph validation
+and dependency insertion in one transaction. Locking the workflow row with
+`FOR UPDATE` serializes dependency creation for a workflow, avoiding the race
+where two concurrent requests each validate against a stale graph.
+
+PostgreSQL remains the first line of defense for invariants expressible with
+constraints, such as same-workflow references, self-dependencies and duplicate
+edges. Application-level graph validation covers the cycle invariant because it
+requires checking the transitive dependency graph.
+
 ## Execution State Automata
 
 GoFlow models three separate execution lifecycles. They share the same generic
@@ -165,3 +222,5 @@ The API validates malformed JSON, missing required fields and invalid UUID path
 parameters before calling the workflow service. Repository constraint mappings
 turn database failures into stable API errors, including duplicate task names,
 duplicate dependencies, missing workflows and invalid task references.
+Dependency cycle validation returns a stable `dependency_cycle` error with
+`400 Bad Request`.

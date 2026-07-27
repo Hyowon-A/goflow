@@ -15,6 +15,7 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Workflow definition API endpoints
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
+- Workflow DAG validation with dependency cycle rejection
 - Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
 - Structured request logging
@@ -67,6 +68,28 @@ overwritten by later retries.
 The schema uses named primary keys, unique constraints, check constraints and
 composite foreign keys to prevent invalid cross-workflow dependencies and
 mismatched task runs.
+
+## Workflow DAG Validation
+
+Workflow dependencies form a directed acyclic graph. Dependency edges point from
+predecessor task to successor task.
+
+```text
+extract -> transform -> load
+```
+
+GoFlow validates dependency graphs before accepting new dependency edges. The
+graph builder tracks all task IDs, outgoing edges, in-degree counts, root tasks
+and leaf tasks. Roots, leaves and successor lists are sorted for deterministic
+output.
+
+Cycle detection uses Kahn's algorithm. When creating a dependency, the
+PostgreSQL repository locks the workflow row, loads tasks and existing
+dependencies inside the same transaction, validates the proposed graph and only
+then inserts the edge. Cyclic dependency requests return a stable
+`dependency_cycle` API error.
+
+Multiple roots, multiple leaves and disconnected components are valid.
 
 ## State Transition Automata
 
@@ -195,7 +218,7 @@ missing. Request logs include method, path, status, duration and request ID.
 
 ## Planned Features
 
-- DAG validation and dependency scheduling
+- Dependency scheduling
 - Redis Streams task distribution
 - Parallel worker execution
 - Idempotent workflow and task processing
