@@ -7,10 +7,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type Queue interface {
-	PublishTask(ctx context.Context, message TaskMessage) (string, error)
-}
-
 type RedisStreamPublisher struct {
 	config Config
 	client *redis.Client

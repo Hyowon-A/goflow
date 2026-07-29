@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestRedisStreamPublisherImplementsQueue(t *testing.T) {
-	var _ Queue = (*RedisStreamPublisher)(nil)
+func TestRedisStreamPublisherImplementsTaskPublisher(t *testing.T) {
+	var _ TaskPublisher = (*RedisStreamPublisher)(nil)
 }
 
 func TestNewRedisStreamPublisherRejectsInvalidConfig(t *testing.T) {
