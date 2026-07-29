@@ -16,4 +16,5 @@ var (
 	ErrUnknownTaskRunStatus     = errors.New("unknown_task_run_status")
 	ErrUnknownTaskAttemptStatus = errors.New("unknown_task_attempt_status")
 	ErrInvalidTransition        = errors.New("invalid_transition")
+	ErrTaskRunNotClaimable      = errors.New("task_run_not_claimable")
 )

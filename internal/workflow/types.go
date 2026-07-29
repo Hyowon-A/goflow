@@ -52,3 +52,16 @@ type WorkflowRun struct {
 	Status     string
 	Input      map[string]any
 }
+
+type TaskRun struct {
+	ID            string
+	WorkflowID    string
+	WorkflowRunID string
+	TaskID        string
+	Status        TaskRunStatus
+}
+
+type ClaimTaskRunInput struct {
+	TaskRunID string
+	WorkerID  string
+}

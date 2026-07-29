@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -100,4 +102,39 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	}
 
 	return workflowRun, nil
+}
+
+func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRunInput) (TaskRun, error) {
+	taskRunID := strings.TrimSpace(input.TaskRunID)
+
+	if taskRunID == "" || strings.TrimSpace(input.WorkerID) == "" {
+		return TaskRun{}, ErrTaskRunNotClaimable
+	}
+	if err := ValidateTaskRunTransition(TaskRunStatusQueued, TaskRunStatusRunning); err != nil {
+		return TaskRun{}, err
+	}
+
+	var taskRun TaskRun
+	err := r.db.QueryRow(ctx, `
+		UPDATE task_runs
+		SET status = $2,
+			started_at = COALESCE(started_at, now())
+		WHERE id = $1
+			AND status = $3
+		RETURNING id, workflow_id, workflow_run_id, task_id, status
+	`, taskRunID, TaskRunStatusRunning, TaskRunStatusQueued).Scan(
+		&taskRun.ID,
+		&taskRun.WorkflowID,
+		&taskRun.WorkflowRunID,
+		&taskRun.TaskID,
+		&taskRun.Status,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TaskRun{}, ErrTaskRunNotClaimable
+		}
+		return TaskRun{}, fmt.Errorf("claim task run: %w", err)
+	}
+
+	return taskRun, nil
 }
