@@ -28,19 +28,30 @@ same-workflow foreign keys, timestamp checks and attempt-number checks.
 Workflow API integration tests also run against PostgreSQL. They verify that the
 HTTP API, workflow service and repository work together correctly.
 
-### Redis queue tests
+### Redis queue and worker tests
 
 Queue unit tests cover configuration validation, task message validation and
-deterministic message field serialization.
+deterministic message field serialization. Consumer-side tests also cover
+parsing Redis field maps into `TaskMessage`, unsupported schema versions,
+missing required fields, generated consumer names and no-message behavior.
 
 Redis Streams integration tests run against real Redis when it is available at
 the configured local address. They publish task messages through the
-`RedisStreamPublisher`, read the stream back, and verify:
+`RedisStreamPublisher`, read the stream back, create consumer groups, consume
+messages through `RedisStreamConsumer`, and verify:
 
 - a Redis stream message ID is returned
 - each message is appended instead of overwritten
 - stream payload fields match the task message schema
+- consumer group creation is idempotent
+- one new message is delivered to one consumer in a group
+- acknowledged messages leave the Redis pending entries list
 - tests skip clearly when Redis is not running
+
+Worker service tests use fakes for Redis and PostgreSQL boundaries. They prove
+that one worker step receives a message, claims the referenced task run,
+acknowledges only after a successful claim, leaves failed claims unacknowledged
+and does not claim anything when the queue read times out.
 
 ## Current Coverage
 
@@ -70,6 +81,9 @@ the configured local address. They publish task messages through the
 - Queue configuration defaults and validation
 - Task queue message schema validation
 - Redis Streams publisher integration with real Redis when available
+- Redis Streams consumer group setup and acknowledgement behavior
+- Conditional task-run claiming from `queued` to `running`
+- Worker receive, claim and acknowledgement coordination
 
 ## Validation Commands
 
@@ -103,6 +117,12 @@ Run the queue tests:
 go test ./internal/queue -v
 ```
 
+Run the worker service tests:
+
+```sh
+go test ./internal/worker -v
+```
+
 Some integration tests require local PostgreSQL. Start it with:
 
 ```sh
@@ -115,7 +135,26 @@ Redis queue integration tests run when Redis is available. Start it with:
 make redis-up
 ```
 
-If Redis is not running, the Redis integration test skips with a clear message.
+If Redis is not running, Redis integration tests skip with a clear message.
+
+Manual Day 7 pending-entry validation can be run against local Docker services:
+
+```sh
+make postgres-up
+make redis-up
+```
+
+Use a dedicated stream such as `goflow:tasks:day7-step9`, start `cmd/worker`
+with `QUEUE_STREAM_NAME` pointing to that stream, publish one claimable message
+and one message whose `task_run_id` is not claimable, then inspect:
+
+```sh
+docker compose exec redis redis-cli XINFO GROUPS goflow:tasks:day7-step9
+docker compose exec redis redis-cli XPENDING goflow:tasks:day7-step9 goflow-workers
+```
+
+The claimable message should be acknowledged after the task run moves to
+`running`; the failed-claim message should remain pending.
 
 ## Testing Principles
 
@@ -132,3 +171,7 @@ If Redis is not running, the Redis integration test skips with a clear message.
   depends on transactions, locks or database constraints.
 - Keep queue message serialization tests independent of Redis.
 - Use real Redis for publisher behavior so the tests prove the `XADD` boundary.
+- Use real Redis for consumer-group behavior so the tests prove `XREADGROUP`
+  and `XACK` semantics.
+- Keep worker service tests independent of Redis and PostgreSQL by testing the
+  coordination contract with fakes.

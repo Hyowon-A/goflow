@@ -233,17 +233,53 @@ runs, task attempts, statuses, inputs and outputs. Redis messages are delivery
 records that carry enough identifiers for later worker code to load the
 authoritative state from PostgreSQL.
 
-The queue package currently exposes a small publishing boundary:
+The queue package exposes separate publishing and consuming boundaries:
 
 ```go
-type Queue interface {
+type TaskPublisher interface {
 	PublishTask(ctx context.Context, message TaskMessage) (string, error)
+}
+
+type TaskConsumer interface {
+	ReceiveTask(ctx context.Context) (ReceivedTaskMessage, error)
+	AckTask(ctx context.Context, messageID string) error
+	Close() error
 }
 ```
 
 The Redis implementation owns one Redis client per publisher and appends
 messages with `XADD` to the configured stream. The returned value is the Redis
 stream message ID.
+
+Worker consumers use Redis consumer groups. A worker creates the configured
+group idempotently with `XGROUP CREATE ... MKSTREAM`, then reads new messages
+with `XREADGROUP` using the worker ID as the Redis consumer name. Empty reads
+return a stable no-message result so workers can poll while still respecting
+shutdown.
+
+```text
+                     Redis Stream: goflow:tasks
+        +------------------------------------------------+
+        | 178...-0  workflow_run_id=... task_run_id=A    |
+        | 179...-0  workflow_run_id=... task_run_id=B    |
+        | 180...-0  workflow_run_id=... task_run_id=C    |
+        +------------------------------------------------+
+                             |
+                             v
+                Consumer Group: goflow-workers
+                             |
+             +---------------+---------------+
+             |                               |
+             v                               v
+       worker-1 XREADGROUP             worker-2 XREADGROUP
+             |                               |
+             v                               v
+       receives task_run A             receives task_run B
+```
+
+Consumer groups prevent every worker from receiving every new message. Within a
+group, Redis assigns each new stream entry to one consumer. After delivery, the
+message is pending for that consumer until GoFlow acknowledges it.
 
 Task message fields are stable and explicit:
 
@@ -259,10 +295,48 @@ The queue intentionally does not embed full task configuration, input payloads
 or secrets. Workers should use the IDs in the message to load the current task
 state and payload references from PostgreSQL.
 
-Delivery semantics are at least once. Later consumers must be idempotent because
-Redis may redeliver messages after consumer failures or acknowledgement gaps.
-Acknowledgement, claiming, retry leases, dead-letter handling and worker
-execution are outside the current publisher implementation.
+Delivery semantics are at least once. Workers must be idempotent because Redis
+may redeliver messages after consumer failures or acknowledgement gaps. The Day
+7 worker flow is intentionally narrow:
+
+1. Receive one Redis message.
+2. Parse and validate the task message fields.
+3. Claim the referenced task run in PostgreSQL by moving it from `queued` to
+   `running`.
+4. Acknowledge the Redis message only after the claim succeeds.
+
+```text
+Redis stream entry
+  |
+  | XREADGROUP GROUP goflow-workers worker-1 STREAMS goflow:tasks >
+  v
+Redis pending entry
+  |
+  | UPDATE task_runs
+  | SET status = 'running'
+  | WHERE id = task_run_id
+  |   AND status = 'queued'
+  v
+PostgreSQL claim result
+  |
+  +-- claim succeeds
+  |      |
+  |      v
+  |    XACK goflow:tasks goflow-workers message_id
+  |      |
+  |      v
+  |    Redis pending entry removed
+  |
+  +-- claim fails
+         |
+         v
+       no XACK; Redis pending entry remains
+```
+
+If the claim fails because the task run is missing or no longer queued, the
+worker leaves the Redis message pending. Pending-message recovery, leases,
+dead-letter handling, retry behavior, executor logic and downstream scheduling
+remain future work.
 
 The current workflow service does not publish root task runs when creating a
 workflow run. When publishing is wired into workflow-run creation, publishing

@@ -24,16 +24,29 @@ needs.
 
 GoFlow will use Redis Streams as the initial queue backend.
 
-The application will expose a small Go interface:
+The application will expose a small Go publishing interface:
 
 ```go
-type Queue interface {
+type TaskPublisher interface {
 	PublishTask(ctx context.Context, message TaskMessage) (string, error)
 }
 ```
 
 The Redis implementation will append task messages with `XADD` to a configured
 stream and return the Redis stream message ID.
+
+Day 7 adds a separate consumer interface for worker delivery:
+
+```go
+type TaskConsumer interface {
+	ReceiveTask(ctx context.Context) (ReceivedTaskMessage, error)
+	AckTask(ctx context.Context, messageID string) error
+	Close() error
+}
+```
+
+The Redis consumer uses consumer groups with `XREADGROUP` and acknowledges with
+`XACK` only after PostgreSQL task-run claiming succeeds.
 
 Task messages will include:
 
@@ -52,12 +65,12 @@ PostgreSQL.
 ### Redis Streams
 
 Redis Streams provides durable stream entries, blocking reads and consumer-group
-support for later worker pools. It is easy to run locally with Docker Compose
-and has mature Go client support through `github.com/redis/go-redis/v9`.
+support for worker pools. It is easy to run locally with Docker Compose and has
+mature Go client support through `github.com/redis/go-redis/v9`.
 
 Redis Streams still requires careful consumer implementation. At-least-once
 delivery means workers must be idempotent and acknowledgements must be handled
-explicitly when worker consumption is added.
+explicitly.
 
 ### Redis Pub/Sub
 
@@ -85,7 +98,7 @@ Positive consequences:
 
 - Local development only needs PostgreSQL and Redis.
 - Queue publishing can be tested against a real Redis instance.
-- Future worker consumers can use Redis consumer groups.
+- Worker consumers can use Redis consumer groups.
 - The service interface is not coupled to Redis client types.
 
 Tradeoffs:
@@ -99,8 +112,9 @@ Tradeoffs:
 
 ## Reliability Boundary
 
-Day 6 implements queue publishing only. It does not implement worker consumers,
-message acknowledgement, claiming, leases, retries, dead-letter handling,
+Day 6 implements queue publishing only. Day 7 adds worker consumption,
+message acknowledgement after task-run claiming and a minimal worker loop. It
+does not implement task execution, leases, retries, dead-letter handling,
 scheduler dependency release or transactional outbox publishing.
 
 When workflow-run creation is later wired to queue publishing, GoFlow must avoid

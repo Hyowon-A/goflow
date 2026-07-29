@@ -12,10 +12,12 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - PostgreSQL integration using `pgx`
 - Local PostgreSQL and Redis setup with Docker Compose
 - Redis Streams task publisher
+- Redis Streams worker consumer groups
 - Health and readiness endpoints
 - Workflow definition API endpoints
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
+- Worker task-run claiming from `queued` to `running`
 - Workflow DAG validation with dependency cycle rejection
 - Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
@@ -42,8 +44,30 @@ GoFlow API
 PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams is the task-delivery boundary. The current implementation can
-publish task messages to a configured stream; worker consumption and scheduler
-publishing are planned later.
+publish task messages to a configured stream, consume them with Redis consumer
+groups, claim queued task runs in PostgreSQL, and acknowledge Redis messages
+only after the claim succeeds. Scheduler publishing and task execution are
+planned later.
+
+```text
+Redis XADD
+  |
+  v
+Redis stream message
+  |
+  v
+Worker XREADGROUP
+  |
+  v
+PostgreSQL claim: task_run queued -> running
+  |
+  +-- success --> Redis XACK --> message removed from pending
+  |
+  +-- failure --> no XACK ----> message remains pending
+```
+
+Redis says which task run a worker should try. PostgreSQL decides whether that
+worker is allowed to own it.
 
 ## Database Schema
 
@@ -184,8 +208,12 @@ values can be provided through `.env`.
 | `APP_ENV` | No | `development` | Runtime environment name. |
 | `HTTP_PORT` | No | `8080` | API listen port. |
 | `DATABASE_URL` | Yes | None | PostgreSQL connection string. |
-| `REDIS_ADDR` | No | `localhost:6379` | Redis address used by the queue publisher. |
+| `REDIS_ADDR` | No | `localhost:6379` | Redis address used by the queue publisher and worker consumer. |
 | `QUEUE_STREAM_NAME` | No | `goflow:tasks` | Redis stream used for task messages. |
+| `WORKER_ID` | No | Generated | Worker consumer name used for Redis consumer groups and task-run claims. |
+| `QUEUE_CONSUMER_GROUP` | No | `goflow-workers` | Redis consumer group used by workers. |
+| `QUEUE_BLOCK_TIMEOUT` | No | `1s` | Blocking read timeout for worker Redis reads. |
+| `QUEUE_READ_COUNT` | No | `1` | Maximum messages read per worker Redis read. |
 
 The provided `.env.example` points at the local Docker Compose PostgreSQL
 instance on port `5433` and Redis on port `6379`.
@@ -225,8 +253,9 @@ missing. Request logs include method, path, status, duration and request ID.
 ## Planned Features
 
 - Dependency scheduling
-- Redis Streams worker consumption
-- Parallel worker execution
+- Task executor implementations
+- Scheduler publishing to Redis Streams
+- Parallel task execution
 - Idempotent workflow and task processing
 - Retry with exponential backoff
 - Dead-letter handling

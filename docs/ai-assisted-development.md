@@ -235,7 +235,7 @@ All architectural decisions, code changes and reliability claims are reviewed an
 
 - Planned the queue boundary before wiring scheduler or worker behavior
 - Compared Redis Streams, Redis Pub/Sub, RabbitMQ and Asynq for the initial queue layer
-- Added a small `queue.Queue` interface for task publishing
+- Added a small `queue.TaskPublisher` interface for task publishing
 - Added a task message schema with stable Redis field names
 - Added Redis queue configuration and local Docker Compose support
 - Implemented a Redis Streams publisher using `XADD`
@@ -275,3 +275,53 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./...`
 - Ran `make check`
 - Verified the Redis integration test publishes multiple stream entries with the expected fields
+
+## Day 7
+
+### AI-assisted work
+
+- Added worker queue configuration for worker ID, consumer group, block timeout and read count
+- Added a Redis Streams consumer boundary separate from the publisher boundary
+- Added parsing from Redis stream field maps back into validated `TaskMessage` values
+- Implemented Redis consumer group setup with idempotent `XGROUP CREATE ... MKSTREAM`
+- Implemented `XREADGROUP` consumption and `XACK` acknowledgement
+- Added conditional PostgreSQL task-run claiming from `queued` to `running`
+- Added a small worker service that coordinates receive, claim and acknowledgement
+- Wired `cmd/worker` to load configuration, connect to PostgreSQL and Redis, and process one message at a time until shutdown
+
+### Accepted suggestions
+
+- Kept PostgreSQL as the source of truth and used Redis only for task delivery
+- Used Redis consumer groups so multiple workers share one stream without every worker receiving every new message
+- Used the worker ID as the Redis consumer name and as the identifier passed into task-run claims
+- Acknowledged Redis messages only after the PostgreSQL claim step succeeds
+- Left failed-claim messages pending so acknowledgement does not hide unprocessed work
+- Kept executor behavior out of Day 7
+
+### Modified suggestions
+
+- Implemented single-message worker processing before optimizing batches, even though the Redis consumer config includes a read count
+- Treated `ErrNoMessage` as a normal polling result in the worker loop instead of logging it as a failure
+- Used a dedicated validation stream for manual Redis pending-entry checks so local default queue data is not disturbed
+
+### Rejected suggestions
+
+- Rejected acknowledging messages before PostgreSQL state changes succeed
+- Rejected completing task runs during Day 7 because real executor behavior belongs to Day 8
+- Rejected retry, dead-letter and pending-message recovery logic during Day 7
+- Rejected lease or heartbeat columns before the recovery model is designed
+- Rejected embedding task configuration or input payloads into Redis messages
+
+### Validation performed
+
+- Ran `go test ./internal/config`
+- Ran `go test ./internal/queue -v`
+- Ran `go test ./internal/workflow -v`
+- Ran `go test ./internal/worker`
+- Ran `go test ./cmd/worker -v`
+- Ran `go test ./internal/httpserver -v`
+- Ran `make check`
+- Started Redis and PostgreSQL with Docker Compose
+- Published one non-claimable validation message and verified it remained pending
+- Published one claimable validation message and verified the task run moved to `running`
+- Verified the acknowledged message did not remain in Redis pending entries
