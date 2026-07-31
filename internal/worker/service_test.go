@@ -10,92 +10,147 @@ import (
 	"github.com/Hyowon-A/goflow/internal/workflow"
 )
 
-func TestServiceProcessOneReceivesClaimsAndAcknowledgesTask(t *testing.T) {
-	consumer := &fakeConsumer{
-		received: queue.ReceivedTaskMessage{
-			MessageID: "redis-message-id",
-			TaskMessage: queue.TaskMessage{
-				WorkflowID:    "workflow-id",
-				WorkflowRunID: "workflow-run-id",
-				TaskID:        "task-id",
-				TaskRunID:     "task-run-id",
-			},
-		},
-	}
-	claimer := &fakeTaskRunClaimer{
-		claimed: workflow.TaskRun{
-			ID:     "task-run-id",
-			Status: workflow.TaskRunStatusRunning,
-		},
-	}
-	service := NewService(ServiceConfig{WorkerID: "worker-1"}, consumer, claimer)
+func TestServiceProcessOneRunsExecutorCompletesAttemptAndAcknowledgesTask(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed", "message": "ok"}}
 
-	err := service.ProcessOne(context.Background())
+	err := fixture.service.ProcessOne(context.Background())
 	if err != nil {
 		t.Fatalf("process one task: %v", err)
 	}
 
-	wantClaims := []workflow.ClaimTaskRunInput{
-		{TaskRunID: "task-run-id", WorkerID: "worker-1"},
+	if !reflect.DeepEqual(fixture.claimer.claims, []workflow.ClaimTaskRunInput{{TaskRunID: "task-run-id", WorkerID: "worker-1"}}) {
+		t.Fatalf("unexpected claim inputs: got %#v", fixture.claimer.claims)
 	}
-	if !reflect.DeepEqual(claimer.claims, wantClaims) {
-		t.Fatalf("unexpected claim inputs: got %#v, want %#v", claimer.claims, wantClaims)
+	if !reflect.DeepEqual(fixture.repo.loads, []workflow.LoadTaskRunExecutionInput{{
+		TaskRunID:     "task-run-id",
+		WorkflowID:    "workflow-id",
+		WorkflowRunID: "workflow-run-id",
+		TaskID:        "task-id",
+	}}) {
+		t.Fatalf("unexpected load inputs: got %#v", fixture.repo.loads)
 	}
+	if !reflect.DeepEqual(fixture.executor.inputs, []ExecutionInput{{
+		WorkflowID:    "workflow-id",
+		WorkflowRunID: "workflow-run-id",
+		TaskID:        "task-id",
+		TaskRunID:     "task-run-id",
+		ExecutorType:  ExecutorTypeLog,
+		Config:        map[string]any{"message": "from config"},
+		TaskRunInput:  map[string]any{"message": "from input"},
+	}}) {
+		t.Fatalf("unexpected executor inputs: got %#v", fixture.executor.inputs)
+	}
+	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
+		TaskAttemptID: "attempt-id",
+		TaskRunID:     "task-run-id",
+		Success:       true,
+		Output:        map[string]any{"status": "completed", "message": "ok"},
+	}}) {
+		t.Fatalf("unexpected completions: got %#v", fixture.repo.completions)
+	}
+	if !reflect.DeepEqual(fixture.consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acked, got %#v", fixture.consumer.acks)
+	}
+}
 
-	if !reflect.DeepEqual(consumer.acks, []string{"redis-message-id"}) {
-		t.Fatalf("expected redis-message-id to be acked, got %#v", consumer.acks)
+func TestServiceProcessOneDoesNotAckWhenQueueReadTimesOut(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.consumer.receiveErr = queue.ErrNoMessage
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, queue.ErrNoMessage) {
+		t.Fatalf("expected ErrNoMessage, got %v", err)
+	}
+	if len(fixture.claimer.claims) != 0 {
+		t.Fatalf("expected no claim attempts when no message is received, got %#v", fixture.claimer.claims)
+	}
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected no acknowledgements when no message is received, got %#v", fixture.consumer.acks)
 	}
 }
 
 func TestServiceProcessOneDoesNotAckWhenClaimFails(t *testing.T) {
-	consumer := &fakeConsumer{
-		received: queue.ReceivedTaskMessage{
-			MessageID: "redis-message-id",
-			TaskMessage: queue.TaskMessage{
-				WorkflowID:    "workflow-id",
-				WorkflowRunID: "workflow-run-id",
-				TaskID:        "task-id",
-				TaskRunID:     "task-run-id",
-			},
-		},
-	}
-	claimer := &fakeTaskRunClaimer{
-		claimErr: workflow.ErrTaskRunNotClaimable,
-	}
-	service := NewService(ServiceConfig{WorkerID: "worker-1"}, consumer, claimer)
+	fixture := newServiceTestFixture()
+	fixture.claimer.claimErr = workflow.ErrTaskRunNotClaimable
 
-	err := service.ProcessOne(context.Background())
+	err := fixture.service.ProcessOne(context.Background())
 	if !errors.Is(err, workflow.ErrTaskRunNotClaimable) {
 		t.Fatalf("expected ErrTaskRunNotClaimable, got %v", err)
 	}
-
-	if len(consumer.acks) != 0 {
-		t.Fatalf("expected no acknowledgements after claim failure, got %#v", consumer.acks)
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected no acknowledgements after claim failure, got %#v", fixture.consumer.acks)
 	}
 }
 
-func TestServiceProcessOneDoesNotClaimWhenQueueReadTimesOut(t *testing.T) {
-	consumer := &fakeConsumer{
-		receiveErr: queue.ErrNoMessage,
-	}
-	claimer := &fakeTaskRunClaimer{}
-	service := NewService(ServiceConfig{WorkerID: "worker-1"}, consumer, claimer)
+func TestServiceProcessOnePersistsExecutorFailureAndAcknowledgesTask(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{FailureReason: "random failure"}
 
-	err := service.ProcessOne(context.Background())
-	if !errors.Is(err, queue.ErrNoMessage) {
-		t.Fatalf("expected ErrNoMessage, got %v", err)
+	err := fixture.service.ProcessOne(context.Background())
+	if err != nil {
+		t.Fatalf("process one task: %v", err)
 	}
 
-	if len(claimer.claims) != 0 {
-		t.Fatalf("expected no claim attempts when no message is received, got %#v", claimer.claims)
+	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
+		TaskAttemptID: "attempt-id",
+		TaskRunID:     "task-run-id",
+		Success:       false,
+		FailureReason: "random failure",
+	}}) {
+		t.Fatalf("unexpected completions: got %#v", fixture.repo.completions)
 	}
-	if len(consumer.acks) != 0 {
-		t.Fatalf("expected no acknowledgements when no message is received, got %#v", consumer.acks)
+	if !reflect.DeepEqual(fixture.consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acked, got %#v", fixture.consumer.acks)
 	}
 }
 
-func TestServiceProcessOneReturnsAckErrorAfterSuccessfulClaim(t *testing.T) {
-	ackErr := errors.New("ack failed")
+func TestServiceProcessOnePersistsUnknownExecutorFailureAndAcknowledgesTask(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.repo.execution.ExecutorType = "unknown"
+
+	err := fixture.service.ProcessOne(context.Background())
+	if err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
+		TaskAttemptID: "attempt-id",
+		TaskRunID:     "task-run-id",
+		Success:       false,
+		FailureReason: ErrUnknownExecutorType.Error(),
+	}}) {
+		t.Fatalf("unexpected completions: got %#v", fixture.repo.completions)
+	}
+	if !reflect.DeepEqual(fixture.consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acked, got %#v", fixture.consumer.acks)
+	}
+}
+
+func TestServiceProcessOneDoesNotAckWhenCompletionPersistenceFails(t *testing.T) {
+	completeErr := errors.New("complete failed")
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+	fixture.repo.completeErr = completeErr
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, completeErr) {
+		t.Fatalf("expected completion error, got %v", err)
+	}
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected no acknowledgements after completion failure, got %#v", fixture.consumer.acks)
+	}
+}
+
+type serviceTestFixture struct {
+	consumer *fakeConsumer
+	claimer  *fakeTaskRunClaimer
+	repo     *fakeExecutionRepository
+	executor *fakeExecutionExecutor
+	service  *Service
+}
+
+func newServiceTestFixture() serviceTestFixture {
 	consumer := &fakeConsumer{
 		received: queue.ReceivedTaskMessage{
 			MessageID: "redis-message-id",
@@ -106,23 +161,41 @@ func TestServiceProcessOneReturnsAckErrorAfterSuccessfulClaim(t *testing.T) {
 				TaskRunID:     "task-run-id",
 			},
 		},
-		ackErr: ackErr,
 	}
 	claimer := &fakeTaskRunClaimer{
-		claimed: workflow.TaskRun{
-			ID:     "task-run-id",
-			Status: workflow.TaskRunStatusRunning,
+		claimed: workflow.TaskRun{ID: "task-run-id", Status: workflow.TaskRunStatusRunning},
+	}
+	repo := &fakeExecutionRepository{
+		execution: workflow.TaskRunExecution{
+			WorkflowID:    "workflow-id",
+			WorkflowRunID: "workflow-run-id",
+			TaskID:        "task-id",
+			TaskRunID:     "task-run-id",
+			ExecutorType:  ExecutorTypeLog,
+			Config:        map[string]any{"message": "from config"},
+			TaskRunInput:  map[string]any{"message": "from input"},
+		},
+		attempt: workflow.TaskAttempt{
+			ID:            "attempt-id",
+			TaskRunID:     "task-run-id",
+			AttemptNumber: 1,
+			Status:        workflow.TaskAttemptStatusRunning,
 		},
 	}
-	service := NewService(ServiceConfig{WorkerID: "worker-1"}, consumer, claimer)
+	executor := &fakeExecutionExecutor{}
 
-	err := service.ProcessOne(context.Background())
-	if !errors.Is(err, ackErr) {
-		t.Fatalf("expected ack error, got %v", err)
-	}
-
-	if len(claimer.claims) != 1 {
-		t.Fatalf("expected one successful claim before ack failure, got %#v", claimer.claims)
+	return serviceTestFixture{
+		consumer: consumer,
+		claimer:  claimer,
+		repo:     repo,
+		executor: executor,
+		service: NewService(
+			ServiceConfig{WorkerID: "worker-1"},
+			consumer,
+			claimer,
+			repo,
+			NewExecutorRegistry(map[string]Executor{ExecutorTypeLog: executor}),
+		),
 	}
 }
 
@@ -161,4 +234,53 @@ func (c *fakeTaskRunClaimer) ClaimTaskRun(_ context.Context, input workflow.Clai
 		return workflow.TaskRun{}, c.claimErr
 	}
 	return c.claimed, nil
+}
+
+type fakeExecutionRepository struct {
+	execution       workflow.TaskRunExecution
+	loadErr         error
+	attempt         workflow.TaskAttempt
+	createErr       error
+	completeErr     error
+	loads           []workflow.LoadTaskRunExecutionInput
+	createdAttempts []string
+	completions     []workflow.CompleteTaskAttemptInput
+}
+
+func (r *fakeExecutionRepository) LoadTaskRunExecution(_ context.Context, input workflow.LoadTaskRunExecutionInput) (workflow.TaskRunExecution, error) {
+	r.loads = append(r.loads, input)
+	if r.loadErr != nil {
+		return workflow.TaskRunExecution{}, r.loadErr
+	}
+	return r.execution, nil
+}
+
+func (r *fakeExecutionRepository) CreateTaskAttempt(_ context.Context, taskRunID string) (workflow.TaskAttempt, error) {
+	r.createdAttempts = append(r.createdAttempts, taskRunID)
+	if r.createErr != nil {
+		return workflow.TaskAttempt{}, r.createErr
+	}
+	return r.attempt, nil
+}
+
+func (r *fakeExecutionRepository) CompleteTaskAttempt(_ context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error) {
+	r.completions = append(r.completions, input)
+	if r.completeErr != nil {
+		return workflow.CompleteTaskAttemptResult{}, r.completeErr
+	}
+	return workflow.CompleteTaskAttemptResult{
+		TaskAttempt: workflow.TaskAttempt{ID: input.TaskAttemptID, TaskRunID: input.TaskRunID},
+		TaskRun:     workflow.TaskRun{ID: input.TaskRunID},
+	}, nil
+}
+
+type fakeExecutionExecutor struct {
+	result ExecutionResult
+	err    error
+	inputs []ExecutionInput
+}
+
+func (e *fakeExecutionExecutor) Execute(_ context.Context, input ExecutionInput) (ExecutionResult, error) {
+	e.inputs = append(e.inputs, input)
+	return e.result, e.err
 }

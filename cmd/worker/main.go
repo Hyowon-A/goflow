@@ -59,9 +59,18 @@ func run() error {
 	defer redisConsumer.Close()
 
 	repo := workflow.NewPostgresRepository(db)
-	service := worker.NewService(worker.ServiceConfig{
-		WorkerID: cfg.WorkerID,
-	}, redisConsumer, repo)
+	executors := worker.NewExecutorRegistry(map[string]worker.Executor{
+		worker.ExecutorTypeSleep:      worker.SleepExecutor{},
+		worker.ExecutorTypeLog:        worker.NewLogExecutor(log.Default()),
+		worker.ExecutorTypeRandomFail: worker.NewRandomFailExecutor(nil),
+	})
+	service := worker.NewService(
+		worker.ServiceConfig{WorkerID: cfg.WorkerID},
+		redisConsumer,
+		repo,
+		repo,
+		executors,
+	)
 
 	log.Printf(
 		"starting GoFlow worker id=%s stream=%s group=%s",
