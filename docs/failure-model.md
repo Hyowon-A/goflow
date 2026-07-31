@@ -67,13 +67,19 @@ record fails, the `workflow_runs` insert is rolled back with it.
 history instead of overwriting earlier attempts when retries occur.
 
 The API currently creates pending `task_runs` when a workflow run starts. It
-does not create `task_attempts`; attempts will be created by execution logic
-when workers actually run tasks.
+does not create `task_attempts`; workers create attempts only when they actually
+run tasks.
+
+During worker execution, GoFlow creates a running `task_attempt` after a task
+run is claimed. Successful executor output completes both the attempt and task
+run. Executor errors, unknown executor types and explicit executor failure
+reasons complete both records as failed. Redis acknowledgement happens only
+after the completion update succeeds.
 
 ## Planned Worker Failure Handling
 
-Later phases will add Redis Streams, worker leases, retries and dead-letter
-handling. The planned model is:
+Later phases will add worker leases, retries and dead-letter handling. The
+planned model is:
 
 - Workers process tasks with at-least-once delivery semantics.
 - Task execution must be idempotent or guarded against duplicate side effects.

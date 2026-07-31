@@ -325,3 +325,39 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Published one non-claimable validation message and verified it remained pending
 - Published one claimable validation message and verified the task run moved to `running`
 - Verified the acknowledged message did not remain in Redis pending entries
+
+## Day 8
+
+### AI-assisted work
+
+- Added PostgreSQL repository methods to load task execution data, create task attempts and complete task attempts with task-run terminal state updates
+- Added built-in worker executors for `sleep`, `log` and `random_fail`
+- Added executor resolution by task executor type
+- Updated the worker service to claim a task run, load execution data, create an attempt, run the executor, complete the attempt and acknowledge the Redis message
+- Wired `cmd/worker` with the built-in executor registry
+- Added repository integration tests for task-attempt creation, completion and task-run execution loading
+- Added worker unit and integration tests for successful execution, executor failure and unknown executor types
+
+### Accepted suggestions
+
+- Kept PostgreSQL as the source of truth for task outcome and attempt history
+- Acknowledged Redis messages only after completion is persisted
+- Kept Redis messages small and loaded executor config/input from PostgreSQL
+- Used simple built-in executors to prove the worker execution path before adding user-defined execution
+
+### Modified suggestions
+
+- Collapsed executor output to `map[string]any` so executors return the shape the repository already persists
+- Kept executor lookup as a small map-backed registry instead of adding a larger plugin system
+- Kept random failure deterministic in tests with a function field instead of a custom random-source abstraction
+
+### Rejected suggestions
+
+- Rejected retries, leases, pending-message recovery and dead-letter behavior during Day 8
+- Rejected scheduler publishing during Day 8
+- Rejected embedding full task configuration or input payloads into Redis messages
+- Rejected a general-purpose executor plugin framework before external executor loading exists
+
+### Validation performed
+
+- Ran `go test ./...`

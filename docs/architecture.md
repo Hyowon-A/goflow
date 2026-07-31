@@ -230,8 +230,8 @@ Dependency cycle validation returns a stable `dependency_cycle` error with
 GoFlow uses Redis Streams as the initial task-delivery boundary. PostgreSQL
 remains the authoritative store for workflow definitions, workflow runs, task
 runs, task attempts, statuses, inputs and outputs. Redis messages are delivery
-records that carry enough identifiers for later worker code to load the
-authoritative state from PostgreSQL.
+records that carry enough identifiers for worker code to load the authoritative
+state from PostgreSQL.
 
 The queue package exposes separate publishing and consuming boundaries:
 
@@ -292,18 +292,22 @@ Task message fields are stable and explicit:
 | `task_run_id` | Logical task run ID. |
 
 The queue intentionally does not embed full task configuration, input payloads
-or secrets. Workers should use the IDs in the message to load the current task
-state and payload references from PostgreSQL.
+or secrets. Workers use the IDs in the message to load the current task state
+and task input from PostgreSQL.
 
 Delivery semantics are at least once. Workers must be idempotent because Redis
-may redeliver messages after consumer failures or acknowledgement gaps. The Day
-7 worker flow is intentionally narrow:
+may redeliver messages after consumer failures or acknowledgement gaps. The
+current worker flow processes one message at a time:
 
 1. Receive one Redis message.
 2. Parse and validate the task message fields.
 3. Claim the referenced task run in PostgreSQL by moving it from `queued` to
    `running`.
-4. Acknowledge the Redis message only after the claim succeeds.
+4. Load the task definition, executor type, task config and task-run input.
+5. Create a running `task_attempt`.
+6. Resolve and run the configured executor.
+7. Complete the task attempt and task run as `completed` or `failed`.
+8. Acknowledge the Redis message only after completion is persisted.
 
 ```text
 Redis stream entry
@@ -322,6 +326,15 @@ PostgreSQL claim result
   +-- claim succeeds
   |      |
   |      v
+  |    Load task + create attempt
+  |      |
+  |      v
+  |    Executor.Execute
+  |      |
+  |      v
+  |    CompleteTaskAttempt
+  |      |
+  |      v
   |    XACK goflow:tasks goflow-workers message_id
   |      |
   |      v
@@ -334,9 +347,20 @@ PostgreSQL claim result
 ```
 
 If the claim fails because the task run is missing or no longer queued, the
-worker leaves the Redis message pending. Pending-message recovery, leases,
-dead-letter handling, retry behavior, executor logic and downstream scheduling
-remain future work.
+worker leaves the Redis message pending. If completion persistence fails, the
+worker also leaves the message pending so the task is not acknowledged before
+PostgreSQL records the outcome.
+
+Built-in executors are intentionally small:
+
+| Executor type | Behavior |
+| --- | --- |
+| `sleep` | Sleeps for a configured Go duration and returns `{"status":"completed"}`. |
+| `log` | Logs a message from task config or task-run input and returns it as output. |
+| `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
+
+Pending-message recovery, leases, retries, dead-letter handling and downstream
+scheduling remain future work.
 
 The current workflow service does not publish root task runs when creating a
 workflow run. When publishing is wired into workflow-run creation, publishing

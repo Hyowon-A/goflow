@@ -49,9 +49,14 @@ messages through `RedisStreamConsumer`, and verify:
 - tests skip clearly when Redis is not running
 
 Worker service tests use fakes for Redis and PostgreSQL boundaries. They prove
-that one worker step receives a message, claims the referenced task run,
-acknowledges only after a successful claim, leaves failed claims unacknowledged
-and does not claim anything when the queue read times out.
+that one worker step receives a message, claims the referenced task run, loads
+execution data, creates a task attempt, runs the executor, completes the
+attempt and task run, and acknowledges only after completion is persisted.
+
+Worker executor tests cover the built-in `sleep`, `log` and `random_fail`
+executors. Worker service integration tests use PostgreSQL with fake queue
+messages to verify successful and failed execution paths end in durable task
+state.
 
 ## Current Coverage
 
@@ -83,7 +88,10 @@ and does not claim anything when the queue read times out.
 - Redis Streams publisher integration with real Redis when available
 - Redis Streams consumer group setup and acknowledgement behavior
 - Conditional task-run claiming from `queued` to `running`
-- Worker receive, claim and acknowledgement coordination
+- Task-run execution loading
+- Task-attempt creation and completion
+- Built-in worker executors
+- Worker receive, claim, execute, complete and acknowledgement coordination
 
 ## Validation Commands
 
@@ -137,24 +145,24 @@ make redis-up
 
 If Redis is not running, Redis integration tests skip with a clear message.
 
-Manual Day 7 pending-entry validation can be run against local Docker services:
+Manual Redis pending-entry validation can be run against local Docker services:
 
 ```sh
 make postgres-up
 make redis-up
 ```
 
-Use a dedicated stream such as `goflow:tasks:day7-step9`, start `cmd/worker`
-with `QUEUE_STREAM_NAME` pointing to that stream, publish one claimable message
-and one message whose `task_run_id` is not claimable, then inspect:
+Use a dedicated stream such as `goflow:tasks:validation`, start `cmd/worker`
+with `QUEUE_STREAM_NAME` pointing to that stream, publish one executable
+message and one message whose `task_run_id` is not claimable, then inspect:
 
 ```sh
-docker compose exec redis redis-cli XINFO GROUPS goflow:tasks:day7-step9
-docker compose exec redis redis-cli XPENDING goflow:tasks:day7-step9 goflow-workers
+docker compose exec redis redis-cli XINFO GROUPS goflow:tasks:validation
+docker compose exec redis redis-cli XPENDING goflow:tasks:validation goflow-workers
 ```
 
-The claimable message should be acknowledged after the task run moves to
-`running`; the failed-claim message should remain pending.
+The executable message should be acknowledged after the task run reaches a
+terminal state; the failed-claim message should remain pending.
 
 ## Testing Principles
 

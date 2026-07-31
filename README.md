@@ -18,6 +18,8 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
 - Worker task-run claiming from `queued` to `running`
+- Worker task execution with task-attempt creation and completion
+- Built-in `sleep`, `log` and `random_fail` task executors
 - Workflow DAG validation with dependency cycle rejection
 - Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
@@ -45,9 +47,9 @@ PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams is the task-delivery boundary. The current implementation can
 publish task messages to a configured stream, consume them with Redis consumer
-groups, claim queued task runs in PostgreSQL, and acknowledge Redis messages
-only after the claim succeeds. Scheduler publishing and task execution are
-planned later.
+groups, claim queued task runs in PostgreSQL, execute the task, persist a task
+attempt, and acknowledge Redis messages only after completion is persisted.
+Scheduler publishing is planned later.
 
 ```text
 Redis XADD
@@ -61,9 +63,21 @@ Worker XREADGROUP
   v
 PostgreSQL claim: task_run queued -> running
   |
-  +-- success --> Redis XACK --> message removed from pending
+  v
+Load task definition and input
   |
-  +-- failure --> no XACK ----> message remains pending
+  v
+Create task_attempt running
+  |
+  v
+Execute task
+  |
+  v
+Complete task_attempt and task_run
+  |
+  +-- outcome persisted --> Redis XACK --> message removed from pending
+  |
+  +-- persistence error -> no XACK ----> message remains pending
 ```
 
 Redis says which task run a worker should try. PostgreSQL decides whether that
@@ -253,7 +267,6 @@ missing. Request logs include method, path, status, duration and request ID.
 ## Planned Features
 
 - Dependency scheduling
-- Task executor implementations
 - Scheduler publishing to Redis Streams
 - Parallel task execution
 - Idempotent workflow and task processing
