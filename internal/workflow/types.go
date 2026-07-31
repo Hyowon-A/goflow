@@ -31,6 +31,26 @@ type Task struct {
 	OutputSchema map[string]any
 }
 
+type TaskAttempt struct {
+	ID            string
+	TaskRunID     string
+	AttemptNumber uint
+	Status        TaskAttemptStatus
+}
+
+type CompleteTaskAttemptInput struct {
+	TaskAttemptID string
+	TaskRunID     string
+	Success       bool
+	Output        map[string]any
+	FailureReason string
+}
+
+type CompleteTaskAttemptResult struct {
+	TaskAttempt TaskAttempt
+	TaskRun     TaskRun
+}
+
 type CreateDependencyInput struct {
 	PredecessorTaskID string
 	SuccessorTaskID   string
@@ -64,4 +84,21 @@ type TaskRun struct {
 type ClaimTaskRunInput struct {
 	TaskRunID string
 	WorkerID  string
+}
+
+type LoadTaskRunExecutionInput struct {
+	TaskRunID     string
+	WorkflowID    string
+	WorkflowRunID string
+	TaskID        string
+}
+
+type TaskRunExecution struct {
+	WorkflowID    string
+	WorkflowRunID string
+	TaskID        string
+	TaskRunID     string
+	ExecutorType  string
+	Config        map[string]any
+	TaskRunInput  map[string]any
 }

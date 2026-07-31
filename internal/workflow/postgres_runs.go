@@ -138,3 +138,50 @@ func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRu
 
 	return taskRun, nil
 }
+
+func (r *PostgresRepository) LoadTaskRunExecution(ctx context.Context, input LoadTaskRunExecutionInput) (TaskRunExecution, error) {
+	taskRunID := strings.TrimSpace(input.TaskRunID)
+	workflowID := strings.TrimSpace(input.WorkflowID)
+	workflowRunID := strings.TrimSpace(input.WorkflowRunID)
+	taskID := strings.TrimSpace(input.TaskID)
+
+	if taskRunID == "" || workflowID == "" || workflowRunID == "" || taskID == "" {
+		return TaskRunExecution{}, ErrTaskRunExecutionNotFound
+	}
+
+	var taskRunExecution TaskRunExecution
+	err := r.db.QueryRow(ctx, `
+		SELECT
+			task_runs.workflow_id,
+			task_runs.workflow_run_id,
+			task_runs.task_id,
+			task_runs.id,
+			tasks.executor_type,
+			tasks.config,
+			task_runs.input
+		FROM task_runs
+		JOIN tasks
+			ON tasks.id = task_runs.task_id
+			AND tasks.workflow_id = task_runs.workflow_id
+		WHERE task_runs.id = $1
+			AND task_runs.workflow_id = $2
+			AND task_runs.workflow_run_id = $3
+			AND task_runs.task_id = $4
+	`, taskRunID, workflowID, workflowRunID, taskID).Scan(
+		&taskRunExecution.WorkflowID,
+		&taskRunExecution.WorkflowRunID,
+		&taskRunExecution.TaskID,
+		&taskRunExecution.TaskRunID,
+		&taskRunExecution.ExecutorType,
+		&taskRunExecution.Config,
+		&taskRunExecution.TaskRunInput,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TaskRunExecution{}, ErrTaskRunExecutionNotFound
+		}
+		return TaskRunExecution{}, fmt.Errorf("Load task run execution: %w", err)
+	}
+
+	return taskRunExecution, nil
+}
