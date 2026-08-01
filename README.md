@@ -17,6 +17,7 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Workflow definition API endpoints
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
+- DAG scheduler queueing for root tasks and ready successors
 - Worker task-run claiming from `queued` to `running`
 - Worker task execution with task-attempt creation and completion
 - Built-in `sleep`, `log` and `random_fail` task executors
@@ -47,9 +48,9 @@ PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams is the task-delivery boundary. The current implementation can
 publish task messages to a configured stream, consume them with Redis consumer
-groups, claim queued task runs in PostgreSQL, execute the task, persist a task
-attempt, and acknowledge Redis messages only after completion is persisted.
-Scheduler publishing is planned later.
+groups, queue runnable task runs from DAG state, claim queued task runs in
+PostgreSQL, execute the task, persist a task attempt, and acknowledge Redis
+messages only after completion is persisted.
 
 ```text
 Redis XADD
@@ -266,9 +267,6 @@ missing. Request logs include method, path, status, duration and request ID.
 
 ## Planned Features
 
-- Dependency scheduling
-- Scheduler publishing to Redis Streams
-- Parallel task execution
 - Idempotent workflow and task processing
 - Retry with exponential backoff
 - Dead-letter handling

@@ -78,6 +78,37 @@ All architectural decisions, code changes and reliability claims are reviewed an
 ### Validation performed
 
 - Ran `go test ./...`
+
+## Day 9
+
+### AI-assisted work
+
+- Added `QueueRunnableTaskRuns` to move runnable pending task runs to `queued`
+- Used one conditional PostgreSQL `UPDATE ... RETURNING` as the scheduler idempotency boundary
+- Added a scheduler service that publishes one queue message for each task run returned by the update
+- Wired workflow-run creation to trigger scheduler queueing after the database transaction commits
+- Added tests for fan-out, fan-in, duplicate scheduler calls and scheduler publish behavior
+- Added an integration test for `A -> B, C -> D` using real PostgreSQL and an in-memory queue
+
+### Accepted suggestions
+
+- Collapsed root and successor scheduling into the same runnable-task query
+- Published only rows returned by the conditional database update
+- Kept HTTP handlers out of scheduling decisions except for dependency injection
+- Kept Redis out of the DAG E2E test and used the queue interface instead
+
+### Rejected suggestions
+
+- Rejected separate root/successor/readiness query methods before a caller needs them
+- Rejected transactional outbox guarantees during Day 9
+- Rejected retries, dead-letter handling and worker leases during Day 9
+- Rejected a separate scheduler process before the in-process service boundary proves insufficient
+
+### Validation performed
+
+- Ran `go test ./internal/workflow ./internal/scheduler ./internal/httpserver`
+- Ran `go test ./internal/worker -run TestSchedulerAndWorkerExecuteFanOutFanInDAG -v`
+- Ran `go test ./...`
 - Applied `migrations/001_initial_schema.up.sql` to a temporary PostgreSQL database
 - Ran `migrations/001_initial_schema.down.sql` successfully
 - Reapplied `migrations/001_initial_schema.up.sql` after rollback

@@ -359,11 +359,36 @@ Built-in executors are intentionally small:
 | `log` | Logs a message from task config or task-run input and returns it as output. |
 | `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
 
-Pending-message recovery, leases, retries, dead-letter handling and downstream
-scheduling remain future work.
+Pending-message recovery, leases, retries and dead-letter handling remain
+future work.
 
-The current workflow service does not publish root task runs when creating a
-workflow run. When publishing is wired into workflow-run creation, publishing
-must happen after the database transaction commits unless a transactional
-outbox is introduced. Until an outbox exists, GoFlow must not claim atomic
-database update plus Redis publish guarantees.
+## DAG Scheduling
+
+The scheduler is a small coordinator between PostgreSQL workflow state and the
+queue publisher. It asks the workflow repository to move runnable task runs
+from `pending` to `queued`, then publishes one Redis task message for each row
+returned by that update.
+
+```text
+workflow run created or task completed
+  |
+  v
+UPDATE task_runs
+SET status = 'queued'
+WHERE status = 'pending'
+  AND all predecessor task runs are completed
+RETURNING task_run identifiers
+  |
+  v
+Publish one Redis message per returned task run
+```
+
+Root tasks are handled by the same query because they have no predecessor rows.
+Fan-in tasks stay `pending` until every predecessor task run is `completed`.
+Repeated scheduler calls are safe because already queued, running or terminal
+task runs are ignored by the conditional update.
+
+The API triggers root scheduling after workflow-run creation commits. Worker
+completion can call the same scheduler path to release newly ready successors.
+Until the Day 11 outbox exists, GoFlow still has a dual-write gap: a task run
+may be moved to `queued` in PostgreSQL and then fail to publish to Redis.

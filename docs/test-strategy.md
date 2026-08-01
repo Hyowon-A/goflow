@@ -58,6 +58,11 @@ executors. Worker service integration tests use PostgreSQL with fake queue
 messages to verify successful and failed execution paths end in durable task
 state.
 
+Scheduler tests use fake publishers for publish coordination and PostgreSQL
+integration tests for runnable-task selection. A worker/scheduler integration
+test runs an `A -> B, C -> D` workflow with real PostgreSQL and an in-memory
+queue to prove fan-out and fan-in progress without requiring Redis.
+
 ## Current Coverage
 
 - `GET /health`
@@ -92,6 +97,9 @@ state.
 - Task-attempt creation and completion
 - Built-in worker executors
 - Worker receive, claim, execute, complete and acknowledgement coordination
+- Scheduler queueing for runnable task runs
+- Fan-out and fan-in DAG scheduling
+- Duplicate scheduler calls do not queue the same task run twice
 
 ## Validation Commands
 
