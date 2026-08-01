@@ -119,6 +119,35 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Created `tests/integration/schema_constraints.sql`
 - Created `docs/adr/ADR-001-workflow-definitions-and-execution-runs.md`
 
+## Day 10
+
+### AI-assisted work
+
+- Added workflow-run `Idempotency-Key` handling for duplicate API requests
+- Added request hashing so the same key can replay the same request but reject a different request
+- Hardened duplicate Redis task messages by acknowledging already-owned or terminal task runs without creating another attempt
+- Added structured logs for idempotency replay, idempotency conflict, duplicate task messages and scheduler no-op decisions
+- Added focused tests for duplicate handling and log output
+
+### Accepted suggestions
+
+- Scoped workflow-run idempotency keys to one workflow ID
+- Kept request hashes internal and out of logs
+- Reused the existing PostgreSQL claim boundary for duplicate queue messages
+- Logged idempotency and duplicate-delivery decisions through existing logging tools instead of adding metrics early
+
+### Rejected suggestions
+
+- Rejected a new logging abstraction for Day 10
+- Rejected Prometheus metrics before Day 15
+- Rejected exactly-once execution claims because Redis delivery remains at least once
+- Rejected retry, dead-letter, lease recovery and outbox behavior during Day 10
+
+### Validation performed
+
+- Ran `go test ./internal/httpserver ./internal/scheduler ./internal/worker ./internal/workflow`
+- Ran `go test ./...`
+
 ## Day 3
 
 ### AI-assisted work

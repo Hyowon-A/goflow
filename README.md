@@ -20,11 +20,13 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - DAG scheduler queueing for root tasks and ready successors
 - Worker task-run claiming from `queued` to `running`
 - Worker task execution with task-attempt creation and completion
+- Idempotent workflow-run submission with `Idempotency-Key`
+- Duplicate queue-message acknowledgement for already-owned or terminal task runs
 - Built-in `sleep`, `log` and `random_fail` task executors
 - Workflow DAG validation with dependency cycle rejection
 - Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
-- Structured request logging
+- Structured request, idempotency, scheduler and duplicate-message logging
 - Graceful shutdown on `Ctrl+C` and `SIGTERM`
 - Standardised development commands through a `Makefile`
 
@@ -267,7 +269,7 @@ missing. Request logs include method, path, status, duration and request ID.
 
 ## Planned Features
 
-- Idempotent workflow and task processing
+- Broader idempotency cleanup and retention policy
 - Retry with exponential backoff
 - Dead-letter handling
 - Transactional outbox publishing

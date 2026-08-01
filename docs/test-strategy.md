@@ -51,7 +51,10 @@ messages through `RedisStreamConsumer`, and verify:
 Worker service tests use fakes for Redis and PostgreSQL boundaries. They prove
 that one worker step receives a message, claims the referenced task run, loads
 execution data, creates a task attempt, runs the executor, completes the
-attempt and task run, and acknowledges only after completion is persisted.
+attempt and task run, and acknowledges only after completion is persisted. They
+also verify duplicate queue messages for already-owned or terminal task runs
+are acknowledged without creating another attempt and emit structured duplicate
+message logs.
 
 Worker executor tests cover the built-in `sleep`, `log` and `random_fail`
 executors. Worker service integration tests use PostgreSQL with fake queue
@@ -61,7 +64,8 @@ state.
 Scheduler tests use fake publishers for publish coordination and PostgreSQL
 integration tests for runnable-task selection. A worker/scheduler integration
 test runs an `A -> B, C -> D` workflow with real PostgreSQL and an in-memory
-queue to prove fan-out and fan-in progress without requiring Redis.
+queue to prove fan-out and fan-in progress without requiring Redis. Scheduler
+tests also verify no-op scheduling logs when no task runs changed state.
 
 ## Current Coverage
 
@@ -86,6 +90,8 @@ queue to prove fan-out and fan-in progress without requiring Redis.
 - Empty workflow runs
 - Request ID response headers and error bodies
 - Structured request logging
+- Workflow-run idempotency key replay and conflict behavior
+- Idempotency replay and conflict logging
 - Transactional workflow-run creation with pending task runs
 - Transactional dependency creation with graph validation before insert
 - Queue configuration defaults and validation
@@ -97,9 +103,11 @@ queue to prove fan-out and fan-in progress without requiring Redis.
 - Task-attempt creation and completion
 - Built-in worker executors
 - Worker receive, claim, execute, complete and acknowledgement coordination
+- Duplicate queue-message acknowledgement and logging
 - Scheduler queueing for runnable task runs
 - Fan-out and fan-in DAG scheduling
 - Duplicate scheduler calls do not queue the same task run twice
+- Scheduler no-op logging when no runnable task runs changed state
 
 ## Validation Commands
 

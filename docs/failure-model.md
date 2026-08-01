@@ -40,10 +40,13 @@ Current domain and persistence failures include:
 - Duplicate task name inside a workflow
 - Duplicate dependency
 - Empty workflow run
+- Reused idempotency key with a different workflow-run request
 - Unexpected database or repository failure
 
 Duplicate task names and duplicate dependencies return `409 Conflict`. Missing
 workflows return `404 Not Found`. Validation errors return `400 Bad Request`.
+Idempotency-key conflicts also return `409 Conflict` and are logged without the
+request body or request hash.
 
 ## Database Consistency
 
@@ -75,6 +78,13 @@ run is claimed. Successful executor output completes both the attempt and task
 run. Executor errors, unknown executor types and explicit executor failure
 reasons complete both records as failed. Redis acknowledgement happens only
 after the completion update succeeds.
+
+Duplicate queue messages are handled at the PostgreSQL claim boundary. If a
+task run is already `running`, `completed`, `failed` or `dead_letter`, the
+worker acknowledges the duplicate Redis message without creating another
+attempt. Unknown task runs, ambiguous lookup failures and non-ready states stay
+pending. Duplicate acknowledgements are logged with workflow, task, Redis
+message, worker and reason fields.
 
 ## Planned Worker Failure Handling
 

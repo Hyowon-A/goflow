@@ -218,6 +218,17 @@ Implemented workflow API endpoints:
 | `POST` | `/workflows/{workflowID}/dependencies` | Create a dependency edge between two tasks. |
 | `POST` | `/workflows/{workflowID}/runs` | Create a workflow run and pending task runs transactionally. |
 
+Workflow-run creation accepts an optional `Idempotency-Key` header. The key is
+scoped to the workflow ID for this endpoint. Repeating the same key with the
+same request body returns the original workflow run; reusing the key with a
+different body returns `409 Conflict`. Keys are retained indefinitely until a
+cleanup policy exists.
+
+Idempotency decisions are logged without request payloads or request hashes.
+Successful replays emit `idempotency_key_reused` with request, workflow and
+workflow-run IDs. Conflicts emit `idempotency_key_conflict` with request and
+workflow IDs.
+
 The API validates malformed JSON, missing required fields and invalid UUID path
 parameters before calling the workflow service. Repository constraint mappings
 turn database failures into stable API errors, including duplicate task names,
@@ -343,13 +354,21 @@ PostgreSQL claim result
   +-- claim fails
          |
          v
-       no XACK; Redis pending entry remains
+       Load current task-run status
+         |
+         +-- running/completed/failed/dead_letter: XACK duplicate
+         |
+         +-- missing/other error/pending/retry_wait: no XACK
 ```
 
-If the claim fails because the task run is missing or no longer queued, the
-worker leaves the Redis message pending. If completion persistence fails, the
-worker also leaves the message pending so the task is not acknowledged before
-PostgreSQL records the outcome.
+If the claim fails, the worker checks PostgreSQL before acknowledging. Messages
+for task runs already `running`, `completed`, `failed` or `dead_letter` are
+harmless duplicates and are acknowledged without creating another attempt.
+Unknown task runs, ambiguous lookup failures and non-ready states remain
+pending. If completion persistence fails, the worker also leaves the message
+pending so the task is not acknowledged before PostgreSQL records the outcome.
+Acknowledged duplicate messages emit `duplicate_task_message` with workflow,
+task, Redis message, worker, status and reason fields.
 
 Built-in executors are intentionally small:
 
@@ -387,6 +406,8 @@ Root tasks are handled by the same query because they have no predecessor rows.
 Fan-in tasks stay `pending` until every predecessor task run is `completed`.
 Repeated scheduler calls are safe because already queued, running or terminal
 task runs are ignored by the conditional update.
+Scheduler passes that find no runnable task runs emit `scheduler_noop` with the
+workflow run ID and reason.
 
 The API triggers root scheduling after workflow-run creation commits. Worker
 completion can call the same scheduler path to release newly ready successors.
