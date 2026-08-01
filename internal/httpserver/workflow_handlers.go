@@ -211,7 +211,7 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.workflows.CreateWorkflowRun(r.Context(), workflowID, workflow.CreateWorkflowRunInput{
+	workflowRun, err := s.workflows.CreateWorkflowRun(r.Context(), workflowID, workflow.CreateWorkflowRunInput{
 		Input: req.Input,
 	})
 	if err != nil {
@@ -219,12 +219,19 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Location", "/workflows/"+workflowID+"/runs/"+result.ID)
+	if s.scheduler != nil {
+		if err := s.scheduler.QueueRunnableTaskRuns(r.Context(), workflowRun.ID); err != nil {
+			writeWorkflowError(w, id, err)
+			return
+		}
+	}
+
+	w.Header().Set("Location", "/workflows/"+workflowID+"/runs/"+workflowRun.ID)
 	writeJSON(w, http.StatusCreated, workflowRunResponse{
-		ID:         result.ID,
-		WorkflowID: result.WorkflowID,
-		Status:     result.Status,
-		Input:      result.Input,
+		ID:         workflowRun.ID,
+		WorkflowID: workflowRun.WorkflowID,
+		Status:     workflowRun.Status,
+		Input:      workflowRun.Input,
 	})
 }
 

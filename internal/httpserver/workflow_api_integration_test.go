@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -94,6 +95,22 @@ func workflowAPIHandler(t *testing.T) (*pgxpool.Pool, http.Handler) {
 
 	pool := workflowAPITestPool(t)
 	return pool, New(pool).Handler()
+}
+
+func workflowAPIHandlerWithScheduler(t *testing.T, scheduler *schedulerRecorder) (*pgxpool.Pool, http.Handler) {
+	t.Helper()
+
+	pool := workflowAPITestPool(t)
+	return pool, New(pool, scheduler).Handler()
+}
+
+type schedulerRecorder struct {
+	workflowRunIDs []string
+}
+
+func (s *schedulerRecorder) QueueRunnableTaskRuns(_ context.Context, workflowRunID string) error {
+	s.workflowRunIDs = append(s.workflowRunIDs, workflowRunID)
+	return nil
 }
 
 func uniqueWorkflowName(prefix string) string {
@@ -678,6 +695,25 @@ func TestWorkflowRunCreatesTaskRunsForEachWorkflowTask(t *testing.T) {
 		if taskRun.attemptCount != 0 {
 			t.Fatalf("expected task run %s attempt_count 0, got %d", taskID, taskRun.attemptCount)
 		}
+	}
+}
+
+func TestWorkflowRunCreationTriggersScheduler(t *testing.T) {
+	scheduler := &schedulerRecorder{}
+	pool, handler := workflowAPIHandlerWithScheduler(t, scheduler)
+
+	workflowName := uniqueWorkflowName("day9-scheduler-trigger")
+	cleanupWorkflowByName(t, pool, workflowName)
+
+	workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+	createTaskThroughAPI(t, handler, workflowID, "extract")
+
+	workflowRunID := createWorkflowRunThroughAPI(t, handler, workflowID, map[string]any{
+		"document_id": "doc-scheduler-trigger",
+	})
+
+	if !reflect.DeepEqual(scheduler.workflowRunIDs, []string{workflowRunID}) {
+		t.Fatalf("expected scheduler to receive workflow run %s, got %#v", workflowRunID, scheduler.workflowRunIDs)
 	}
 }
 

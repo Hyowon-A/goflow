@@ -185,3 +185,52 @@ func (r *PostgresRepository) LoadTaskRunExecution(ctx context.Context, input Loa
 
 	return taskRunExecution, nil
 }
+
+func (r *PostgresRepository) QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) ([]TaskRun, error) {
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return []TaskRun{}, ErrWorkflowRunNotFound
+	}
+
+	rows, err := r.db.Query(ctx, `
+		UPDATE task_runs tr
+		SET status = $2
+		WHERE tr.workflow_run_id = $1
+			AND tr.status = $3
+			AND NOT EXISTS (
+				SELECT 1
+				FROM task_dependencies d
+				LEFT JOIN task_runs pred
+				  ON pred.workflow_id = tr.workflow_id
+				 AND pred.workflow_run_id = tr.workflow_run_id
+				 AND pred.task_id = d.predecessor_task_id
+				WHERE d.workflow_id = tr.workflow_id
+				  AND d.successor_task_id = tr.task_id
+				  AND (pred.id IS NULL OR pred.status <> $4))
+		RETURNING id, workflow_id, workflow_run_id, task_id, status
+	`, workflowRunID, TaskRunStatusQueued, TaskRunStatusPending, TaskRunStatusCompleted)
+	if err != nil {
+		return nil, fmt.Errorf("queue runnable task runs: %w", err)
+	}
+	defer rows.Close()
+
+	var taskRuns []TaskRun
+	for rows.Next() {
+		var taskRun TaskRun
+		if err := rows.Scan(
+			&taskRun.ID,
+			&taskRun.WorkflowID,
+			&taskRun.WorkflowRunID,
+			&taskRun.TaskID,
+			&taskRun.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan queued runnable task run: %w", err)
+		}
+		taskRuns = append(taskRuns, taskRun)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queued runnable task runs: %w", err)
+	}
+
+	return taskRuns, nil
+}

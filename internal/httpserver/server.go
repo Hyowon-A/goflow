@@ -15,6 +15,7 @@ type Server struct {
 	router    *chi.Mux
 	db        databasePinger
 	workflows workflowService
+	scheduler schedulerService
 	logger    *slog.Logger
 }
 
@@ -29,11 +30,18 @@ type workflowService interface {
 	CreateWorkflowRun(ctx context.Context, workflowID string, input workflow.CreateWorkflowRunInput) (workflow.WorkflowRun, error)
 }
 
-func New(db *pgxpool.Pool) *Server {
+type schedulerService interface {
+	QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) error
+}
+
+func New(db *pgxpool.Pool, schedulers ...schedulerService) *Server {
 	repo := workflow.NewPostgresRepository(db)
 	service := workflow.NewService(repo)
-
-	return newServer(db, service)
+	server := newServer(db, service)
+	if len(schedulers) > 0 {
+		server.scheduler = schedulers[0]
+	}
+	return server
 }
 
 func newServer(db databasePinger, services ...workflowService) *Server {

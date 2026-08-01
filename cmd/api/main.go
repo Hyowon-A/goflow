@@ -15,6 +15,9 @@ import (
 	"github.com/Hyowon-A/goflow/internal/config"
 	"github.com/Hyowon-A/goflow/internal/database"
 	"github.com/Hyowon-A/goflow/internal/httpserver"
+	"github.com/Hyowon-A/goflow/internal/queue"
+	"github.com/Hyowon-A/goflow/internal/scheduler"
+	"github.com/Hyowon-A/goflow/internal/workflow"
 )
 
 func main() {
@@ -44,7 +47,17 @@ func run() error {
 	}
 	defer db.Close()
 
-	app := httpserver.New(db)
+	repo := workflow.NewPostgresRepository(db)
+	publisher, err := queue.NewRedisStreamPublisher(queue.Config{
+		Addr:       cfg.RedisAddr,
+		StreamName: cfg.QueueStreamName,
+	})
+	if err != nil {
+		return err
+	}
+	defer publisher.Close()
+
+	app := httpserver.New(db, scheduler.NewService(repo, publisher))
 
 	server := &http.Server{
 		Addr:              cfg.Address(),
