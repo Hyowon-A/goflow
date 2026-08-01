@@ -1,9 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
@@ -38,6 +41,11 @@ func TestServiceQueueRunnableTaskRunsPublishesReturnedTaskRuns(t *testing.T) {
 }
 
 func TestServiceQueueRunnableTaskRunsPublishesNothingWhenNoRowsChanged(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
 	publisher := &fakePublisher{}
 	service := NewService(&fakeRepository{}, publisher)
 
@@ -47,6 +55,41 @@ func TestServiceQueueRunnableTaskRunsPublishesNothingWhenNoRowsChanged(t *testin
 	}
 	if len(publisher.messages) != 0 {
 		t.Fatalf("expected no published messages, got %#v", publisher.messages)
+	}
+	logOutput := logs.String()
+	for _, want := range []string{
+		`"msg":"scheduler_noop"`,
+		`"workflow_run_id":"workflow-run"`,
+		`"reason":"no_runnable_task_runs"`,
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("expected log output to contain %s, got %s", want, logOutput)
+		}
+	}
+}
+
+func TestServiceQueueRunnableTaskRunsPublishesOnlyRowsChangedAcrossDuplicateCalls(t *testing.T) {
+	repo := &fakeRepository{
+		batches: [][]workflow.TaskRun{
+			{{ID: "task-run-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1"}},
+			nil,
+		},
+	}
+	publisher := &fakePublisher{}
+	service := NewService(repo, publisher)
+
+	if err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run"); err != nil {
+		t.Fatalf("queue first runnable task runs: %v", err)
+	}
+	if err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run"); err != nil {
+		t.Fatalf("queue duplicate runnable task runs: %v", err)
+	}
+
+	want := []queue.TaskMessage{
+		{WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"},
+	}
+	if !reflect.DeepEqual(publisher.messages, want) {
+		t.Fatalf("expected duplicate scheduler call to publish only changed rows, got %#v", publisher.messages)
 	}
 }
 
@@ -95,6 +138,7 @@ func TestServiceQueueRunnableTaskRunsReturnsErrors(t *testing.T) {
 
 type fakeRepository struct {
 	taskRuns       []workflow.TaskRun
+	batches        [][]workflow.TaskRun
 	err            error
 	workflowRunIDs []string
 }
@@ -103,6 +147,11 @@ func (r *fakeRepository) QueueRunnableTaskRuns(_ context.Context, workflowRunID 
 	r.workflowRunIDs = append(r.workflowRunIDs, workflowRunID)
 	if r.err != nil {
 		return nil, r.err
+	}
+	if len(r.batches) > 0 {
+		taskRuns := r.batches[0]
+		r.batches = r.batches[1:]
+		return taskRuns, nil
 	}
 	return r.taskRuns, nil
 }

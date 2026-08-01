@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
@@ -18,6 +20,7 @@ type TaskRunClaimer interface {
 }
 
 type Repository interface {
+	LoadTaskRunStatus(ctx context.Context, input workflow.LoadTaskRunStatusInput) (workflow.TaskRunStatus, error)
 	LoadTaskRunExecution(ctx context.Context, input workflow.LoadTaskRunExecutionInput) (workflow.TaskRunExecution, error)
 	CreateTaskAttempt(ctx context.Context, taskRunID string) (workflow.TaskAttempt, error)
 	CompleteTaskAttempt(ctx context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error)
@@ -62,6 +65,9 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		WorkerID:  s.config.WorkerID,
 	})
 	if err != nil {
+		if errors.Is(err, workflow.ErrTaskRunNotClaimable) {
+			return s.handleUnclaimableTaskRun(ctx, message)
+		}
 		return err
 	}
 
@@ -120,6 +126,30 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *Service) handleUnclaimableTaskRun(ctx context.Context, message queue.ReceivedTaskMessage) error {
+	status, err := s.repo.LoadTaskRunStatus(ctx, workflow.LoadTaskRunStatusInput{TaskRunID: message.TaskRunID})
+	if err != nil {
+		return err
+	}
+
+	switch status {
+	case workflow.TaskRunStatusRunning, workflow.TaskRunStatusCompleted, workflow.TaskRunStatusFailed, workflow.TaskRunStatusDeadLetter:
+		slog.InfoContext(ctx, "duplicate_task_message",
+			slog.String("workflow_id", message.WorkflowID),
+			slog.String("workflow_run_id", message.WorkflowRunID),
+			slog.String("task_id", message.TaskID),
+			slog.String("task_run_id", message.TaskRunID),
+			slog.String("redis_message_id", message.MessageID),
+			slog.String("worker_id", s.config.WorkerID),
+			slog.String("status", string(status)),
+			slog.String("reason", "not_claimable"),
+		)
+		return s.consumer.AckTask(ctx, message.MessageID)
+	default:
+		return workflow.ErrTaskRunNotClaimable
+	}
 }
 
 func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.TaskAttempt, taskRunID, reason string) error {

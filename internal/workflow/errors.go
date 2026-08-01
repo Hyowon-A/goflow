@@ -19,6 +19,8 @@ var (
 	ErrInvalidTransition        = errors.New("invalid_transition")
 	ErrTaskRunNotClaimable      = errors.New("task_run_not_claimable")
 	ErrTaskRunNotFound          = errors.New("task_run_not_found")
+	ErrTaskAttemptAlreadyExists = errors.New("task_attempt_already_exists")
 	ErrTaskAttemptNotFound      = errors.New("task_attempt_not_found")
 	ErrTaskRunExecutionNotFound = errors.New("task_run_execution_not_found")
+	ErrIdempotencyConflict      = errors.New("idempotency_conflict")
 )

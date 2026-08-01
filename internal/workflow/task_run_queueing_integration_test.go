@@ -68,7 +68,9 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	if err != nil {
 		t.Fatalf("queue first runnable task runs: %v", err)
 	}
-	if got := taskIDs(queued); !reflect.DeepEqual(got, []string{fixture.taskIDs["B"], fixture.taskIDs["C"]}) {
+	want := []string{fixture.taskIDs["B"], fixture.taskIDs["C"]}
+	sort.Strings(want)
+	if got := taskIDs(queued); !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected B and C to queue after A, got %#v", got)
 	}
 	assertTaskRunStatuses(t, pool, fixture.workflowRunID, map[string]TaskRunStatus{
@@ -94,6 +96,14 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	}
 	if got := taskIDs(queued); !reflect.DeepEqual(got, []string{fixture.taskIDs["D"]}) {
 		t.Fatalf("expected D to queue after B and C complete, got %#v", got)
+	}
+
+	queued, err = repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err != nil {
+		t.Fatalf("queue D duplicate scheduler call: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("expected duplicate successor scheduling to return no rows, got %#v", queued)
 	}
 }
 

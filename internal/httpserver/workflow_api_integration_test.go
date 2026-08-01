@@ -22,6 +22,7 @@ import (
 const (
 	defaultWorkflowAPITestDatabaseURL = "postgres://goflow:goflow@localhost:5433/goflow?sslmode=disable"
 	workflowAPIMigrationPath          = "../../migrations/001_initial_schema.up.sql"
+	workflowAPIIdempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
 )
 
 var (
@@ -86,8 +87,60 @@ func setupWorkflowAPITestDatabase(ctx context.Context) (*pgxpool.Pool, error) {
 			return nil, err
 		}
 	}
+	if err := ensureWorkflowAPIIdempotencySchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return pool, nil
+}
+
+func ensureWorkflowAPIIdempotencySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var columnExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+				AND table_name = 'workflow_runs'
+				AND column_name = 'idempotency_key'
+		)
+	`).Scan(&columnExists)
+	if err != nil {
+		return err
+	}
+	if !columnExists {
+		migrationSQL, err := os.ReadFile(workflowAPIIdempotencyPath)
+		if err != nil {
+			return err
+		}
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		return err
+	}
+
+	if _, err := pool.Exec(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_runs_idempotency
+			ON workflow_runs (workflow_id, idempotency_key)
+			WHERE idempotency_key IS NOT NULL
+	`); err != nil {
+		return err
+	}
+
+	var constraintExists bool
+	err = pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conname = 'chk_workflow_runs_idempotency_hash'
+		)
+	`).Scan(&constraintExists)
+	if err != nil || constraintExists {
+		return err
+	}
+	_, err = pool.Exec(ctx, `
+		ALTER TABLE workflow_runs
+			ADD CONSTRAINT chk_workflow_runs_idempotency_hash
+			CHECK (idempotency_key IS NULL OR request_hash IS NOT NULL)
+	`)
+	return err
 }
 
 func workflowAPIHandler(t *testing.T) (*pgxpool.Pool, http.Handler) {
@@ -143,6 +196,12 @@ func cleanupWorkflowByName(t *testing.T, pool *pgxpool.Pool, name string) {
 func postJSON(t *testing.T, handler http.Handler, path string, body any, requestID string) *httptest.ResponseRecorder {
 	t.Helper()
 
+	return postJSONWithHeaders(t, handler, path, body, requestID, nil)
+}
+
+func postJSONWithHeaders(t *testing.T, handler http.Handler, path string, body any, requestID string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
@@ -152,6 +211,9 @@ func postJSON(t *testing.T, handler http.Handler, path string, body any, request
 	request.Header.Set("Content-Type", "application/json")
 	if requestID != "" {
 		request.Header.Set("X-Request-ID", requestID)
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
 	}
 
 	response := httptest.NewRecorder()
@@ -630,6 +692,115 @@ func TestWorkflowRunAPIContract(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunIdempotencyKeySemantics(t *testing.T) {
+	t.Run("missing key keeps creating runs", func(t *testing.T) {
+		pool, handler := workflowAPIHandler(t)
+
+		workflowName := uniqueWorkflowName("day10-run-no-key")
+		cleanupWorkflowByName(t, pool, workflowName)
+
+		workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+		createTaskThroughAPI(t, handler, workflowID, "extract")
+		body := map[string]any{"input": map[string]any{"document_id": "doc-123"}}
+
+		first := postJSON(t, handler, "/workflows/"+workflowID+"/runs", body, "")
+		second := postJSON(t, handler, "/workflows/"+workflowID+"/runs", body, "")
+		expectStatus(t, first, http.StatusCreated)
+		expectStatus(t, second, http.StatusCreated)
+
+		firstID := expectStringField(t, decodeJSONBody(t, first), "id")
+		secondID := expectStringField(t, decodeJSONBody(t, second), "id")
+		if firstID == secondID {
+			t.Fatalf("expected missing idempotency key to create separate runs, got %s twice", firstID)
+		}
+	})
+
+	t.Run("same key and same request returns original run", func(t *testing.T) {
+		var logs bytes.Buffer
+		previousLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+		pool, handler := workflowAPIHandler(t)
+
+		workflowName := uniqueWorkflowName("day10-run-same-key")
+		cleanupWorkflowByName(t, pool, workflowName)
+
+		workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+		createTaskThroughAPI(t, handler, workflowID, "extract")
+		path := "/workflows/" + workflowID + "/runs"
+		body := map[string]any{"input": map[string]any{"document_id": "doc-123"}}
+
+		first := postJSONWithHeaders(t, handler, path, body, "", map[string]string{"Idempotency-Key": " day10-key "})
+		second := postJSONWithHeaders(t, handler, path, body, "", map[string]string{"Idempotency-Key": "day10-key"})
+		expectStatus(t, first, http.StatusCreated)
+		expectStatus(t, second, http.StatusCreated)
+
+		firstID := expectStringField(t, decodeJSONBody(t, first), "id")
+		secondID := expectStringField(t, decodeJSONBody(t, second), "id")
+		if firstID != secondID {
+			t.Fatalf("expected idempotent replay to return %s, got %s", firstID, secondID)
+		}
+		if location := second.Header().Get("Location"); location != path+"/"+firstID {
+			t.Fatalf("expected replay Location %q, got %q", path+"/"+firstID, location)
+		}
+		expectWorkflowRunCount(t, pool, workflowID, 1)
+		logOutput := logs.String()
+		for _, want := range []string{
+			`"msg":"idempotency_key_reused"`,
+			`"workflow_id":"` + workflowID + `"`,
+			`"workflow_run_id":"` + firstID + `"`,
+		} {
+			if !strings.Contains(logOutput, want) {
+				t.Fatalf("expected log output to contain %s, got %s", want, logOutput)
+			}
+		}
+	})
+
+	t.Run("same key and different request returns conflict", func(t *testing.T) {
+		var logs bytes.Buffer
+		previousLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+		pool, handler := workflowAPIHandler(t)
+
+		workflowName := uniqueWorkflowName("day10-run-conflict")
+		cleanupWorkflowByName(t, pool, workflowName)
+
+		workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+		createTaskThroughAPI(t, handler, workflowID, "extract")
+		path := "/workflows/" + workflowID + "/runs"
+		headers := map[string]string{"Idempotency-Key": "day10-conflict-key"}
+
+		first := postJSONWithHeaders(t, handler, path, map[string]any{
+			"input": map[string]any{"document_id": "doc-123"},
+		}, "", headers)
+		expectStatus(t, first, http.StatusCreated)
+
+		second := postJSONWithHeaders(t, handler, path, map[string]any{
+			"input": map[string]any{"document_id": "doc-456"},
+		}, "idempotency-conflict-request", headers)
+		expectStatus(t, second, http.StatusConflict)
+		expectRequestIDHeader(t, second, "idempotency-conflict-request")
+
+		responseBody := decodeJSONBody(t, second)
+		expectFieldEquals(t, responseBody, "error", "idempotency_conflict")
+		expectFieldEquals(t, responseBody, "request_id", "idempotency-conflict-request")
+		expectWorkflowRunCount(t, pool, workflowID, 1)
+		logOutput := logs.String()
+		for _, want := range []string{
+			`"msg":"idempotency_key_conflict"`,
+			`"request_id":"idempotency-conflict-request"`,
+			`"workflow_id":"` + workflowID + `"`,
+		} {
+			if !strings.Contains(logOutput, want) {
+				t.Fatalf("expected log output to contain %s, got %s", want, logOutput)
+			}
+		}
+	})
+}
+
 func TestWorkflowRunCreatesTaskRunsForEachWorkflowTask(t *testing.T) {
 	pool, handler := workflowAPIHandler(t)
 
@@ -695,6 +866,22 @@ func TestWorkflowRunCreatesTaskRunsForEachWorkflowTask(t *testing.T) {
 		if taskRun.attemptCount != 0 {
 			t.Fatalf("expected task run %s attempt_count 0, got %d", taskID, taskRun.attemptCount)
 		}
+	}
+}
+
+func expectWorkflowRunCount(t *testing.T, pool *pgxpool.Pool, workflowID string, want int) {
+	t.Helper()
+
+	var count int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM workflow_runs
+		WHERE workflow_id = $1
+	`, workflowID).Scan(&count); err != nil {
+		t.Fatalf("count workflow runs: %v", err)
+	}
+	if count != want {
+		t.Fatalf("expected %d workflow runs, got %d", want, count)
 	}
 }
 

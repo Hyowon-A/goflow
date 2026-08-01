@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -212,11 +213,25 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workflowRun, err := s.workflows.CreateWorkflowRun(r.Context(), workflowID, workflow.CreateWorkflowRunInput{
-		Input: req.Input,
+		Input:          req.Input,
+		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 	})
 	if err != nil {
+		if errors.Is(err, workflow.ErrIdempotencyConflict) {
+			s.logger.InfoContext(r.Context(), "idempotency_key_conflict",
+				slog.String("request_id", id),
+				slog.String("workflow_id", workflowID),
+			)
+		}
 		writeWorkflowError(w, id, err)
 		return
+	}
+	if workflowRun.IdempotencyReused {
+		s.logger.InfoContext(r.Context(), "idempotency_key_reused",
+			slog.String("request_id", id),
+			slog.String("workflow_id", workflowID),
+			slog.String("workflow_run_id", workflowRun.ID),
+		)
 	}
 
 	if s.scheduler != nil {
@@ -251,6 +266,8 @@ func writeWorkflowError(w http.ResponseWriter, requestID string, err error) {
 		writeError(w, http.StatusBadRequest, "dependency_cycle", "dependency would create a cycle", requestID)
 	case errors.Is(err, workflow.ErrEmptyWorkflow):
 		writeError(w, http.StatusBadRequest, "empty_workflow", "workflow must contain at least one task before a run can be created", requestID)
+	case errors.Is(err, workflow.ErrIdempotencyConflict):
+		writeError(w, http.StatusConflict, "idempotency_conflict", "idempotency key was already used with a different request", requestID)
 	case errors.Is(err, workflow.ErrValidation):
 		writeError(w, http.StatusBadRequest, "validation_error", "request failed validation", requestID)
 	case errors.Is(err, workflow.ErrNotImplemented):

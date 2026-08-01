@@ -33,7 +33,7 @@ func TestPostgresRepositoryCreateTaskAttemptCreatesFirstAttempt(t *testing.T) {
 	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
 }
 
-func TestPostgresRepositoryCreateTaskAttemptIncrementsAttemptNumber(t *testing.T) {
+func TestPostgresRepositoryCreateTaskAttemptRejectsSecondAttemptUntilRetriesExist(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
 	repo := NewPostgresRepository(pool)
@@ -42,19 +42,16 @@ func TestPostgresRepositoryCreateTaskAttemptIncrementsAttemptNumber(t *testing.T
 	if err != nil {
 		t.Fatalf("create first task attempt: %v", err)
 	}
-	second, err := repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
-	if err != nil {
-		t.Fatalf("create second task attempt: %v", err)
+	_, err = repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
+	if !errors.Is(err, ErrTaskAttemptAlreadyExists) {
+		t.Fatalf("expected ErrTaskAttemptAlreadyExists, got %v", err)
 	}
 
 	if first.AttemptNumber != 1 {
 		t.Fatalf("expected first attempt number 1, got %d", first.AttemptNumber)
 	}
-	if second.AttemptNumber != 2 {
-		t.Fatalf("expected second attempt number 2, got %d", second.AttemptNumber)
-	}
 
-	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 2)
+	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
 }
 
 func TestPostgresRepositoryCreateTaskAttemptRejectsMissingTaskRun(t *testing.T) {
@@ -72,7 +69,7 @@ func TestPostgresRepositoryCreateTaskAttemptRejectsMissingTaskRun(t *testing.T) 
 	}
 }
 
-func TestPostgresRepositoryCreateTaskAttemptAllowsConcurrentAttempts(t *testing.T) {
+func TestPostgresRepositoryCreateTaskAttemptConcurrentCallsCreateOnlyFirstAttempt(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
 	repo := NewPostgresRepository(pool)
@@ -100,22 +97,20 @@ func TestPostgresRepositoryCreateTaskAttemptAllowsConcurrentAttempts(t *testing.
 	close(numbers)
 
 	for err := range errs {
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrTaskAttemptAlreadyExists) {
 			t.Fatalf("unexpected concurrent create error: %v", err)
 		}
 	}
 
-	seen := make(map[uint]bool)
+	var got []uint
 	for number := range numbers {
-		seen[number] = true
+		got = append(got, number)
 	}
-	for number := uint(1); number <= attemptCount; number++ {
-		if !seen[number] {
-			t.Fatalf("expected attempt number %d to be created, got %#v", number, seen)
-		}
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("expected only attempt number 1 to be created, got %#v", got)
 	}
 
-	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, attemptCount)
+	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
 }
 
 func assertTaskRunAttemptCount(t *testing.T, pool *pgxpool.Pool, taskRunID string, want int) {

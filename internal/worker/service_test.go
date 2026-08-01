@@ -1,9 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
@@ -70,9 +73,10 @@ func TestServiceProcessOneDoesNotAckWhenQueueReadTimesOut(t *testing.T) {
 	}
 }
 
-func TestServiceProcessOneDoesNotAckWhenClaimFails(t *testing.T) {
+func TestServiceProcessOneDoesNotAckWhenClaimFailsForNonDuplicateTask(t *testing.T) {
 	fixture := newServiceTestFixture()
 	fixture.claimer.claimErr = workflow.ErrTaskRunNotClaimable
+	fixture.repo.taskRunStatus = workflow.TaskRunStatusPending
 
 	err := fixture.service.ProcessOne(context.Background())
 	if !errors.Is(err, workflow.ErrTaskRunNotClaimable) {
@@ -80,6 +84,64 @@ func TestServiceProcessOneDoesNotAckWhenClaimFails(t *testing.T) {
 	}
 	if len(fixture.consumer.acks) != 0 {
 		t.Fatalf("expected no acknowledgements after claim failure, got %#v", fixture.consumer.acks)
+	}
+}
+
+func TestServiceProcessOneAcknowledgesDuplicateMessagesForKnownNonQueuedStates(t *testing.T) {
+	statuses := []workflow.TaskRunStatus{
+		workflow.TaskRunStatusRunning,
+		workflow.TaskRunStatusCompleted,
+		workflow.TaskRunStatusFailed,
+		workflow.TaskRunStatusDeadLetter,
+	}
+
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			fixture := newServiceTestFixture()
+			fixture.claimer.claimErr = workflow.ErrTaskRunNotClaimable
+			fixture.repo.taskRunStatus = status
+
+			err := fixture.service.ProcessOne(context.Background())
+			if err != nil {
+				t.Fatalf("process duplicate message: %v", err)
+			}
+			if !reflect.DeepEqual(fixture.consumer.acks, []string{"redis-message-id"}) {
+				t.Fatalf("expected duplicate message to be acked, got %#v", fixture.consumer.acks)
+			}
+			if len(fixture.repo.loads) != 0 || len(fixture.repo.createdAttempts) != 0 || len(fixture.repo.completions) != 0 {
+				t.Fatalf("expected duplicate message to skip execution, got loads=%#v attempts=%#v completions=%#v", fixture.repo.loads, fixture.repo.createdAttempts, fixture.repo.completions)
+			}
+			logOutput := logs.String()
+			for _, want := range []string{
+				`"msg":"duplicate_task_message"`,
+				`"task_run_id":"task-run-id"`,
+				`"redis_message_id":"redis-message-id"`,
+				`"reason":"not_claimable"`,
+			} {
+				if !strings.Contains(logOutput, want) {
+					t.Fatalf("expected log output to contain %s, got %s", want, logOutput)
+				}
+			}
+		})
+	}
+}
+
+func TestServiceProcessOneDoesNotAckWhenDuplicateStatusIsUnknown(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.claimer.claimErr = workflow.ErrTaskRunNotClaimable
+	fixture.repo.statusErr = workflow.ErrTaskRunNotFound
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, workflow.ErrTaskRunNotFound) {
+		t.Fatalf("expected ErrTaskRunNotFound, got %v", err)
+	}
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected unknown task run message to remain pending, got acks %#v", fixture.consumer.acks)
 	}
 }
 
@@ -166,6 +228,7 @@ func newServiceTestFixture() serviceTestFixture {
 		claimed: workflow.TaskRun{ID: "task-run-id", Status: workflow.TaskRunStatusRunning},
 	}
 	repo := &fakeExecutionRepository{
+		taskRunStatus: workflow.TaskRunStatusRunning,
 		execution: workflow.TaskRunExecution{
 			WorkflowID:    "workflow-id",
 			WorkflowRunID: "workflow-run-id",
@@ -237,6 +300,8 @@ func (c *fakeTaskRunClaimer) ClaimTaskRun(_ context.Context, input workflow.Clai
 }
 
 type fakeExecutionRepository struct {
+	taskRunStatus   workflow.TaskRunStatus
+	statusErr       error
 	execution       workflow.TaskRunExecution
 	loadErr         error
 	attempt         workflow.TaskAttempt
@@ -245,6 +310,13 @@ type fakeExecutionRepository struct {
 	loads           []workflow.LoadTaskRunExecutionInput
 	createdAttempts []string
 	completions     []workflow.CompleteTaskAttemptInput
+}
+
+func (r *fakeExecutionRepository) LoadTaskRunStatus(_ context.Context, input workflow.LoadTaskRunStatusInput) (workflow.TaskRunStatus, error) {
+	if r.statusErr != nil {
+		return "", r.statusErr
+	}
+	return r.taskRunStatus, nil
 }
 
 func (r *fakeExecutionRepository) LoadTaskRunExecution(_ context.Context, input workflow.LoadTaskRunExecutionInput) (workflow.TaskRunExecution, error) {

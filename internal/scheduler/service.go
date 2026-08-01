@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -24,6 +25,13 @@ func (s *Service) QueueRunnableTaskRuns(ctx context.Context, workflowRunID strin
 	taskRuns, err := s.repo.QueueRunnableTaskRuns(ctx, workflowRunID)
 	if err != nil {
 		return err
+	}
+	if len(taskRuns) == 0 {
+		slog.InfoContext(ctx, "scheduler_noop",
+			slog.String("workflow_run_id", workflowRunID),
+			slog.String("reason", "no_runnable_task_runs"),
+		)
+		return nil
 	}
 
 	for _, taskRun := range taskRuns {

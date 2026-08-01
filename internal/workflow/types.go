@@ -63,14 +63,16 @@ type Dependency struct {
 }
 
 type CreateWorkflowRunInput struct {
-	Input map[string]any
+	Input          map[string]any
+	IdempotencyKey string
 }
 
 type WorkflowRun struct {
-	ID         string
-	WorkflowID string
-	Status     string
-	Input      map[string]any
+	ID                string
+	WorkflowID        string
+	Status            string
+	Input             map[string]any
+	IdempotencyReused bool
 }
 
 type TaskRun struct {
@@ -79,6 +81,10 @@ type TaskRun struct {
 	WorkflowRunID string
 	TaskID        string
 	Status        TaskRunStatus
+}
+
+type LoadTaskRunStatusInput struct {
+	TaskRunID string
 }
 
 type ClaimTaskRunInput struct {

@@ -127,6 +127,125 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsInvalidTransition(t *testin
 	}
 }
 
+func TestPostgresRepositoryCompleteTaskAttemptRejectsLateFailureAfterSuccessWithoutOverwritingOutput(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
+	repo := NewPostgresRepository(pool)
+
+	attempt, err := repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
+	if err != nil {
+		t.Fatalf("create task attempt: %v", err)
+	}
+	output := map[string]any{"message": "done"}
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       true,
+		Output:        output,
+	})
+	if err != nil {
+		t.Fatalf("complete task attempt: %v", err)
+	}
+
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       false,
+		FailureReason: "late failure",
+	})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	}
+
+	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
+	if persisted.taskRunStatus != TaskRunStatusCompleted {
+		t.Fatalf("expected task run to stay completed, got %q", persisted.taskRunStatus)
+	}
+	if persisted.failureReason != nil {
+		t.Fatalf("expected failure reason to stay empty, got %#v", persisted.failureReason)
+	}
+	if !reflect.DeepEqual(persisted.output, output) {
+		t.Fatalf("expected output to stay %#v, got %#v", output, persisted.output)
+	}
+}
+
+func TestPostgresRepositoryCompleteTaskAttemptRejectsLateSuccessAfterFailureWithoutOverwritingFailure(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
+	repo := NewPostgresRepository(pool)
+
+	attempt, err := repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
+	if err != nil {
+		t.Fatalf("create task attempt: %v", err)
+	}
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       false,
+		FailureReason: "first failure",
+	})
+	if err != nil {
+		t.Fatalf("fail task attempt: %v", err)
+	}
+
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       true,
+		Output:        map[string]any{"message": "late success"},
+	})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	}
+
+	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
+	if persisted.taskRunStatus != TaskRunStatusFailed {
+		t.Fatalf("expected task run to stay failed, got %q", persisted.taskRunStatus)
+	}
+	if persisted.failureReason == nil || *persisted.failureReason != "first failure" {
+		t.Fatalf("expected failure reason to stay first failure, got %#v", persisted.failureReason)
+	}
+	if persisted.output != nil {
+		t.Fatalf("expected output to stay empty, got %#v", persisted.output)
+	}
+}
+
+func TestPostgresRepositoryCompleteTaskAttemptRejectsFailureReplayWithoutDuplicatingAttempts(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
+	repo := NewPostgresRepository(pool)
+
+	attempt, err := repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
+	if err != nil {
+		t.Fatalf("create task attempt: %v", err)
+	}
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       false,
+		FailureReason: "first failure",
+	})
+	if err != nil {
+		t.Fatalf("fail task attempt: %v", err)
+	}
+
+	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: attempt.ID,
+		TaskRunID:     fixture.taskRunID,
+		Success:       false,
+		FailureReason: "second failure",
+	})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	}
+
+	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
+	if persisted.failureReason == nil || *persisted.failureReason != "first failure" {
+		t.Fatalf("expected failure reason to stay first failure, got %#v", persisted.failureReason)
+	}
+	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
+}
+
 func TestPostgresRepositoryCompleteTaskAttemptRejectsMissingAttempt(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	repo := NewPostgresRepository(pool)

@@ -59,35 +59,28 @@ func (r *PostgresRepository) CreateTaskAttempt(ctx context.Context, taskRunID st
 	}
 	defer tx.Rollback(ctx)
 
-	var attemptNumber uint
+	var attemptCount int
 	err = tx.QueryRow(ctx, `
-		WITH locked_task_run AS (
-			SELECT id, attempt_count
-			FROM task_runs
-			WHERE id = $1
-			FOR UPDATE
-		),
-		next_attempt AS (
-			SELECT GREATEST(
-				locked_task_run.attempt_count,
-				COALESCE(MAX(task_attempts.attempt_number), 0)
-			) + 1 AS attempt_number
-			FROM locked_task_run
-			LEFT JOIN task_attempts
-				ON task_attempts.task_run_id = locked_task_run.id
-			GROUP BY locked_task_run.attempt_count
-		)
-		UPDATE task_runs
-		SET attempt_count = next_attempt.attempt_number
-		FROM next_attempt
-		WHERE task_runs.id = $1
-		RETURNING next_attempt.attempt_number
-	`, taskRunID).Scan(&attemptNumber)
+		SELECT attempt_count
+		FROM task_runs
+		WHERE id = $1
+		FOR UPDATE
+	`, taskRunID).Scan(&attemptCount)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return TaskAttempt{}, ErrTaskRunNotFound
 		}
-		return TaskAttempt{}, fmt.Errorf("reserve task attempt number: %w", err)
+		return TaskAttempt{}, fmt.Errorf("load task run attempt count: %w", err)
+	}
+	if attemptCount > 0 {
+		return TaskAttempt{}, ErrTaskAttemptAlreadyExists
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE task_runs
+		SET attempt_count = 1
+		WHERE id = $1
+	`, taskRunID); err != nil {
+		return TaskAttempt{}, fmt.Errorf("reserve first task attempt: %w", err)
 	}
 
 	var taskAttempt TaskAttempt
@@ -95,7 +88,7 @@ func (r *PostgresRepository) CreateTaskAttempt(ctx context.Context, taskRunID st
 		INSERT INTO task_attempts (id, task_run_id, attempt_number, status)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, task_run_id, attempt_number, status
-	`, taskAttemptID, taskRunID, attemptNumber, TaskAttemptStatusRunning).Scan(
+	`, taskAttemptID, taskRunID, 1, TaskAttemptStatusRunning).Scan(
 		&taskAttempt.ID,
 		&taskAttempt.TaskRunID,
 		&taskAttempt.AttemptNumber,

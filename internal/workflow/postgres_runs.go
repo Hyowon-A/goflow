@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +15,17 @@ import (
 
 func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID string, input CreateWorkflowRunInput) (WorkflowRun, error) {
 	workflowRunID := uuid.NewString()
+	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+	var idempotencyKeyPtr *string
+	var requestHashPtr *string
+	if idempotencyKey != "" {
+		requestHash, err := workflowRunRequestHash(input.Input)
+		if err != nil {
+			return WorkflowRun{}, err
+		}
+		idempotencyKeyPtr = &idempotencyKey
+		requestHashPtr = &requestHash
+	}
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -65,10 +78,13 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	var workflowRun WorkflowRun
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO workflow_runs (id, workflow_id, status, input)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO workflow_runs (id, workflow_id, status, input, idempotency_key, request_hash)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (workflow_id, idempotency_key)
+		WHERE idempotency_key IS NOT NULL
+		DO NOTHING
 		RETURNING id, workflow_id, status, input
-	`, workflowRunID, workflowID, "pending", input.Input).Scan(
+	`, workflowRunID, workflowID, "pending", input.Input, idempotencyKeyPtr, requestHashPtr).Scan(
 		&workflowRun.ID,
 		&workflowRun.WorkflowID,
 		&workflowRun.Status,
@@ -76,6 +92,9 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	)
 
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) && idempotencyKeyPtr != nil {
+			return existingWorkflowRunForIdempotencyKey(ctx, tx, workflowID, *idempotencyKeyPtr, *requestHashPtr)
+		}
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			if pgErr.ConstraintName == "fk_workflow_runs_workflow" {
@@ -102,6 +121,61 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	}
 
 	return workflowRun, nil
+}
+
+func workflowRunRequestHash(input map[string]any) (string, error) {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("hash workflow run request: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
+}
+
+func existingWorkflowRunForIdempotencyKey(ctx context.Context, tx pgx.Tx, workflowID, idempotencyKey, requestHash string) (WorkflowRun, error) {
+	var workflowRun WorkflowRun
+	var existingHash *string
+	err := tx.QueryRow(ctx, `
+		SELECT id, workflow_id, status, input, request_hash
+		FROM workflow_runs
+		WHERE workflow_id = $1
+			AND idempotency_key = $2
+	`, workflowID, idempotencyKey).Scan(
+		&workflowRun.ID,
+		&workflowRun.WorkflowID,
+		&workflowRun.Status,
+		&workflowRun.Input,
+		&existingHash,
+	)
+	if err != nil {
+		return WorkflowRun{}, fmt.Errorf("load idempotent workflow run: %w", err)
+	}
+	if existingHash == nil || *existingHash != requestHash {
+		return WorkflowRun{}, ErrIdempotencyConflict
+	}
+	workflowRun.IdempotencyReused = true
+	return workflowRun, nil
+}
+
+func (r *PostgresRepository) LoadTaskRunStatus(ctx context.Context, input LoadTaskRunStatusInput) (TaskRunStatus, error) {
+	taskRunID := strings.TrimSpace(input.TaskRunID)
+	if taskRunID == "" {
+		return "", ErrTaskRunNotFound
+	}
+
+	var status TaskRunStatus
+	err := r.db.QueryRow(ctx, `
+		SELECT status
+		FROM task_runs
+		WHERE id = $1
+	`, taskRunID).Scan(&status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrTaskRunNotFound
+		}
+		return "", fmt.Errorf("load task run status: %w", err)
+	}
+
+	return status, nil
 }
 
 func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRunInput) (TaskRun, error) {

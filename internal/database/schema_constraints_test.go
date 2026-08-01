@@ -16,6 +16,7 @@ import (
 const (
 	defaultTestDatabaseURL = "postgres://goflow:goflow@localhost:5433/goflow?sslmode=disable"
 	migrationPath          = "../../migrations/001_initial_schema.up.sql"
+	idempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
 )
 
 const (
@@ -95,8 +96,60 @@ func setupTestDatabase(ctx context.Context) (*pgxpool.Pool, error) {
 			return nil, err
 		}
 	}
+	if err := ensureIdempotencySchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return pool, nil
+}
+
+func ensureIdempotencySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var columnExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+				AND table_name = 'workflow_runs'
+				AND column_name = 'idempotency_key'
+		)
+	`).Scan(&columnExists)
+	if err != nil {
+		return err
+	}
+	if !columnExists {
+		migrationSQL, err := os.ReadFile(idempotencyPath)
+		if err != nil {
+			return err
+		}
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		return err
+	}
+
+	if _, err := pool.Exec(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_runs_idempotency
+			ON workflow_runs (workflow_id, idempotency_key)
+			WHERE idempotency_key IS NOT NULL
+	`); err != nil {
+		return err
+	}
+
+	var constraintExists bool
+	err = pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conname = 'chk_workflow_runs_idempotency_hash'
+		)
+	`).Scan(&constraintExists)
+	if err != nil || constraintExists {
+		return err
+	}
+	_, err = pool.Exec(ctx, `
+		ALTER TABLE workflow_runs
+			ADD CONSTRAINT chk_workflow_runs_idempotency_hash
+			CHECK (idempotency_key IS NULL OR request_hash IS NOT NULL)
+	`)
+	return err
 }
 
 // beginTx opens a transaction that is always rolled back at the end of the
@@ -317,6 +370,53 @@ func TestValidInserts_MultipleWorkflowRunsForSameDefinition(t *testing.T) {
 	if count != 2 {
 		t.Errorf("expected 2 workflow runs for the same workflow definition, got %d", count)
 	}
+}
+
+func TestWorkflowRunIdempotencyKeyUniquePerWorkflow(t *testing.T) {
+	pool := testPool(t)
+	ctx, tx := beginTx(t, pool)
+
+	if err := insertWorkflow(ctx, tx, workflowAID, "wf-a"); err != nil {
+		t.Fatalf("insert workflow a: %v", err)
+	}
+	if err := insertWorkflow(ctx, tx, workflowBID, "wf-b"); err != nil {
+		t.Fatalf("insert workflow b: %v", err)
+	}
+
+	_, err := tx.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, idempotency_key, request_hash)
+		VALUES ($1, $2, $3, $4)
+	`, "00000000-0000-0000-0000-000000000101", workflowAID, "same-key", "hash-a")
+	if err != nil {
+		t.Fatalf("insert first idempotent workflow run: %v", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, idempotency_key, request_hash)
+		VALUES ($1, $2, $3, $4)
+	`, "00000000-0000-0000-0000-000000000102", workflowBID, "same-key", "hash-b")
+	if err != nil {
+		t.Fatalf("expected same idempotency key to be reusable for another workflow: %v", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, idempotency_key, request_hash)
+		VALUES ($1, $2, $3, $4)
+	`, "00000000-0000-0000-0000-000000000103", workflowAID, "same-key", "hash-c")
+	expectPgError(t, err, "uq_workflow_runs_idempotency")
+}
+
+func TestWorkflowRunIdempotencyKeyRequiresRequestHash(t *testing.T) {
+	pool := testPool(t)
+	ctx, tx := beginTx(t, pool)
+
+	if err := insertWorkflow(ctx, tx, workflowAID, "wf-a"); err != nil {
+		t.Fatalf("insert workflow a: %v", err)
+	}
+
+	_, err := tx.Exec(ctx, `
+		INSERT INTO workflow_runs (id, workflow_id, idempotency_key)
+		VALUES ($1, $2, $3)
+	`, "00000000-0000-0000-0000-000000000104", workflowAID, "key-without-hash")
+	expectPgError(t, err, "chk_workflow_runs_idempotency_hash")
 }
 
 func TestValidInserts_SameTaskNameAcrossDifferentWorkflows(t *testing.T) {

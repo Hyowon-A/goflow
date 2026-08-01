@@ -63,6 +63,7 @@ func (s *Service) CreateDependency(ctx context.Context, workflowID string, input
 
 func (s *Service) CreateWorkflowRun(ctx context.Context, workflowID string, input CreateWorkflowRunInput) (WorkflowRun, error) {
 	workflowID = strings.TrimSpace(workflowID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 
 	if workflowID == "" {
 		return WorkflowRun{}, ErrWorkflowNotFound
