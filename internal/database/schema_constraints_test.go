@@ -17,6 +17,7 @@ const (
 	defaultTestDatabaseURL = "postgres://goflow:goflow@localhost:5433/goflow?sslmode=disable"
 	migrationPath          = "../../migrations/001_initial_schema.up.sql"
 	idempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
+	outboxPath             = "../../migrations/003_task_outbox_events.up.sql"
 )
 
 const (
@@ -100,6 +101,10 @@ func setupTestDatabase(ctx context.Context) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := ensureOutboxSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return pool, nil
 }
@@ -148,6 +153,45 @@ func ensureIdempotencySchema(ctx context.Context, pool *pgxpool.Pool) error {
 		ALTER TABLE workflow_runs
 			ADD CONSTRAINT chk_workflow_runs_idempotency_hash
 			CHECK (idempotency_key IS NULL OR request_hash IS NOT NULL)
+	`)
+	return err
+}
+
+func ensureOutboxSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var tableExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public'
+				AND table_name = 'task_outbox_events'
+		)
+	`).Scan(&tableExists)
+	if err != nil || tableExists {
+		if err != nil {
+			return err
+		}
+		return ensureOutboxClaimSchema(ctx, pool)
+	}
+
+	migrationSQL, err := os.ReadFile(outboxPath)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, string(migrationSQL))
+	return err
+}
+
+func ensureOutboxClaimSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+		ALTER TABLE task_outbox_events
+			DROP CONSTRAINT IF EXISTS chk_task_outbox_events_status;
+		ALTER TABLE task_outbox_events
+			ADD CONSTRAINT chk_task_outbox_events_status
+			CHECK (status IN ('pending', 'publishing', 'published'));
+		DROP INDEX IF EXISTS uq_task_outbox_events_unpublished_task_run;
+		CREATE UNIQUE INDEX uq_task_outbox_events_unpublished_task_run
+			ON task_outbox_events (task_run_id, event_type)
+			WHERE status <> 'published';
 	`)
 	return err
 }
@@ -229,6 +273,14 @@ func insertTaskAttempt(ctx context.Context, tx pgx.Tx, id, taskRunID string, att
 		INSERT INTO task_attempts (id, task_run_id, attempt_number, status, failure_reason)
 		VALUES ($1, $2, $3, $4, $5)
 	`, id, taskRunID, attemptNumber, status, failureReason)
+	return err
+}
+
+func insertTaskOutboxEvent(ctx context.Context, tx pgx.Tx, id, workflowID, workflowRunID, taskID, taskRunID string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id, workflowID, workflowRunID, taskID, taskRunID)
 	return err
 }
 
@@ -417,6 +469,94 @@ func TestWorkflowRunIdempotencyKeyRequiresRequestHash(t *testing.T) {
 		VALUES ($1, $2, $3)
 	`, "00000000-0000-0000-0000-000000000104", workflowAID, "key-without-hash")
 	expectPgError(t, err, "chk_workflow_runs_idempotency_hash")
+}
+
+func TestTaskOutboxEventsRejectDuplicatePendingEventForTaskRun(t *testing.T) {
+	pool := testPool(t)
+	ctx, tx := beginTx(t, pool)
+	taskRunID := seedSingleTaskRun(t, ctx, tx)
+
+	if err := insertTaskOutboxEvent(ctx, tx, "00000000-0000-0000-0000-000000000301", workflowAID, "00000000-0000-0000-0000-0000000000c9", taskExtractID, taskRunID); err != nil {
+		t.Fatalf("insert outbox event: %v", err)
+	}
+
+	err := insertTaskOutboxEvent(ctx, tx, "00000000-0000-0000-0000-000000000302", workflowAID, "00000000-0000-0000-0000-0000000000c9", taskExtractID, taskRunID)
+	expectPgError(t, err, "uq_task_outbox_events_unpublished_task_run")
+}
+
+func TestTaskOutboxEventsPendingScanIsDeterministicAndIgnoresPublishedRows(t *testing.T) {
+	pool := testPool(t)
+	ctx, tx := beginTx(t, pool)
+
+	if err := insertWorkflow(ctx, tx, workflowAID, "wf"); err != nil {
+		t.Fatalf("insert workflow: %v", err)
+	}
+	if err := insertTask(ctx, tx, taskExtractID, workflowAID, "extract", "http"); err != nil {
+		t.Fatalf("insert extract task: %v", err)
+	}
+	if err := insertTask(ctx, tx, taskTransformID, workflowAID, "transform", "http"); err != nil {
+		t.Fatalf("insert transform task: %v", err)
+	}
+
+	workflowRunID := "00000000-0000-0000-0000-000000000309"
+	if err := insertWorkflowRun(ctx, tx, workflowRunID, workflowAID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+
+	taskRunExtractID := "00000000-0000-0000-0000-000000000310"
+	taskRunTransformID := "00000000-0000-0000-0000-000000000311"
+	if err := insertTaskRun(ctx, tx, taskRunExtractID, workflowAID, workflowRunID, taskExtractID); err != nil {
+		t.Fatalf("insert extract task run: %v", err)
+	}
+	if err := insertTaskRun(ctx, tx, taskRunTransformID, workflowAID, workflowRunID, taskTransformID); err != nil {
+		t.Fatalf("insert transform task run: %v", err)
+	}
+
+	_, err := tx.Exec(ctx, `
+		INSERT INTO task_outbox_events (
+			id, workflow_id, workflow_run_id, task_id, task_run_id, status, redis_message_id, published_at, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, 'published', 'redis-1-0', now(), '2026-01-01T00:00:00Z')
+	`, "00000000-0000-0000-0000-000000000312", workflowAID, workflowRunID, taskExtractID, taskRunExtractID)
+	if err != nil {
+		t.Fatalf("insert published outbox event: %v", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id, created_at)
+		VALUES
+			($1, $2, $3, $4, $5, '2026-01-01T00:00:02Z'),
+			($6, $2, $3, $7, $8, '2026-01-01T00:00:01Z')
+	`, "00000000-0000-0000-0000-000000000313", workflowAID, workflowRunID, taskExtractID, taskRunExtractID, "00000000-0000-0000-0000-000000000314", taskTransformID, taskRunTransformID)
+	if err != nil {
+		t.Fatalf("insert pending outbox events: %v", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id
+		FROM task_outbox_events
+		WHERE status = 'pending'
+		ORDER BY created_at, id
+	`)
+	if err != nil {
+		t.Fatalf("scan pending outbox events: %v", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan outbox event id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate outbox event ids: %v", err)
+	}
+
+	if len(ids) != 2 || ids[0] != "00000000-0000-0000-0000-000000000314" || ids[1] != "00000000-0000-0000-0000-000000000313" {
+		t.Fatalf("unexpected pending outbox order: %#v", ids)
+	}
 }
 
 func TestValidInserts_SameTaskNameAcrossDifferentWorkflows(t *testing.T) {
