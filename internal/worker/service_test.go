@@ -204,6 +204,46 @@ func TestServiceProcessOneDoesNotAckWhenCompletionPersistenceFails(t *testing.T)
 	}
 }
 
+func TestServiceProcessOneAcksOnlyAfterCompletionPersistence(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+	var events []string
+	fixture.repo.events = &events
+	fixture.consumer.events = &events
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	if !reflect.DeepEqual(events, []string{"complete", "ack"}) {
+		t.Fatalf("expected completion before ack, got %#v", events)
+	}
+}
+
+func TestServiceProcessOneSchedulesSuccessorsAfterCompletionBeforeAck(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+	var events []string
+	fixture.repo.events = &events
+	fixture.consumer.events = &events
+	scheduler := &fakeScheduler{events: &events}
+	fixture.service.scheduler = scheduler
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	if !reflect.DeepEqual(scheduler.workflowRunIDs, []string{"workflow-run-id"}) {
+		t.Fatalf("unexpected scheduler workflow run IDs: %#v", scheduler.workflowRunIDs)
+	}
+	if !reflect.DeepEqual(fixture.consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected ack after scheduling, got %#v", fixture.consumer.acks)
+	}
+	if !reflect.DeepEqual(events, []string{"complete", "schedule", "ack"}) {
+		t.Fatalf("expected completion, schedule, ack order, got %#v", events)
+	}
+}
+
 type serviceTestFixture struct {
 	consumer *fakeConsumer
 	claimer  *fakeTaskRunClaimer
@@ -267,6 +307,7 @@ type fakeConsumer struct {
 	receiveErr error
 	acks       []string
 	ackErr     error
+	events     *[]string
 }
 
 func (c *fakeConsumer) ReceiveTask(context.Context) (queue.ReceivedTaskMessage, error) {
@@ -278,6 +319,9 @@ func (c *fakeConsumer) ReceiveTask(context.Context) (queue.ReceivedTaskMessage, 
 
 func (c *fakeConsumer) AckTask(_ context.Context, messageID string) error {
 	c.acks = append(c.acks, messageID)
+	if c.events != nil {
+		*c.events = append(*c.events, "ack")
+	}
 	return c.ackErr
 }
 
@@ -310,6 +354,7 @@ type fakeExecutionRepository struct {
 	loads           []workflow.LoadTaskRunExecutionInput
 	createdAttempts []string
 	completions     []workflow.CompleteTaskAttemptInput
+	events          *[]string
 }
 
 func (r *fakeExecutionRepository) LoadTaskRunStatus(_ context.Context, input workflow.LoadTaskRunStatusInput) (workflow.TaskRunStatus, error) {
@@ -340,6 +385,9 @@ func (r *fakeExecutionRepository) CompleteTaskAttempt(_ context.Context, input w
 	if r.completeErr != nil {
 		return workflow.CompleteTaskAttemptResult{}, r.completeErr
 	}
+	if r.events != nil {
+		*r.events = append(*r.events, "complete")
+	}
 	return workflow.CompleteTaskAttemptResult{
 		TaskAttempt: workflow.TaskAttempt{ID: input.TaskAttemptID, TaskRunID: input.TaskRunID},
 		TaskRun:     workflow.TaskRun{ID: input.TaskRunID},
@@ -355,4 +403,18 @@ type fakeExecutionExecutor struct {
 func (e *fakeExecutionExecutor) Execute(_ context.Context, input ExecutionInput) (ExecutionResult, error) {
 	e.inputs = append(e.inputs, input)
 	return e.result, e.err
+}
+
+type fakeScheduler struct {
+	workflowRunIDs []string
+	err            error
+	events         *[]string
+}
+
+func (s *fakeScheduler) QueueRunnableTaskRuns(_ context.Context, workflowRunID string) error {
+	s.workflowRunIDs = append(s.workflowRunIDs, workflowRunID)
+	if s.events != nil {
+		*s.events = append(*s.events, "schedule")
+	}
+	return s.err
 }

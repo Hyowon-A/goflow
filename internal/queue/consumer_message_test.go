@@ -31,6 +31,34 @@ func TestParseTaskMessageFields(t *testing.T) {
 	}
 }
 
+func TestParseTaskMessageFieldsIgnoresOutboxStorageFields(t *testing.T) {
+	fields := map[string]string{
+		"schema_version":   TaskMessageSchemaVersion,
+		"workflow_id":      "workflow-id",
+		"workflow_run_id":  "workflow-run-id",
+		"task_id":          "task-id",
+		"task_run_id":      "task-run-id",
+		"outbox_event_id":  "event-id",
+		"outbox_status":    "published",
+		"redis_message_id": "1700000000000-0",
+	}
+
+	message, err := ParseTaskMessageFields(fields)
+	if err != nil {
+		t.Fatalf("parse task message fields: %v", err)
+	}
+
+	want := TaskMessage{
+		WorkflowID:    "workflow-id",
+		WorkflowRunID: "workflow-run-id",
+		TaskID:        "task-id",
+		TaskRunID:     "task-run-id",
+	}
+	if !reflect.DeepEqual(message, want) {
+		t.Fatalf("unexpected task message: got %#v, want %#v", message, want)
+	}
+}
+
 func TestParseTaskMessageFieldsRejectsMissingRequiredFields(t *testing.T) {
 	valid := map[string]string{
 		"schema_version":  TaskMessageSchemaVersion,

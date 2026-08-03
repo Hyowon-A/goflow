@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Hyowon-A/goflow/internal/config"
 	"github.com/Hyowon-A/goflow/internal/database"
 	"github.com/Hyowon-A/goflow/internal/queue"
+	"github.com/Hyowon-A/goflow/internal/scheduler"
 	"github.com/Hyowon-A/goflow/internal/worker"
 	"github.com/Hyowon-A/goflow/internal/workflow"
 	"github.com/joho/godotenv"
@@ -59,6 +61,16 @@ func run() error {
 	defer redisConsumer.Close()
 
 	repo := workflow.NewPostgresRepository(db)
+	publisher, err := queue.NewRedisStreamPublisher(queue.Config{
+		Addr:       cfg.RedisAddr,
+		StreamName: cfg.QueueStreamName,
+	})
+	if err != nil {
+		return err
+	}
+	defer publisher.Close()
+	outboxDispatcher := scheduler.NewOutboxDispatcher(repo, publisher)
+
 	executors := worker.NewExecutorRegistry(map[string]worker.Executor{
 		worker.ExecutorTypeSleep:      worker.SleepExecutor{},
 		worker.ExecutorTypeLog:        worker.NewLogExecutor(log.Default()),
@@ -70,7 +82,15 @@ func run() error {
 		repo,
 		repo,
 		executors,
+		scheduler.NewService(repo, publisher),
 	)
+	outboxTicker := time.NewTicker(cfg.QueueBlockTimeout)
+	defer outboxTicker.Stop()
+	dispatchOutbox := func() {
+		if err := outboxDispatcher.DispatchPendingTaskOutboxEvents(ctx); err != nil {
+			log.Printf("task outbox dispatch failed: %v", err)
+		}
+	}
 
 	log.Printf(
 		"starting GoFlow worker id=%s stream=%s group=%s",
@@ -80,6 +100,12 @@ func run() error {
 	)
 
 	for {
+		select {
+		case <-outboxTicker.C:
+			dispatchOutbox()
+		default:
+		}
+
 		if err := service.ProcessOne(ctx); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
@@ -88,6 +114,7 @@ func run() error {
 				if ctx.Err() != nil {
 					break
 				}
+				dispatchOutbox()
 				continue
 			}
 

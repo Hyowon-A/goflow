@@ -211,6 +211,9 @@ func readRedisValue(reader *bufio.Reader) (redisValue, error) {
 		if err != nil {
 			return redisValue{}, err
 		}
+		if length < 0 {
+			return redisValue{kind: prefix}, nil
+		}
 		values := make([]redisValue, 0, length)
 		for i := 0; i < length; i++ {
 			value, err := readRedisValue(reader)

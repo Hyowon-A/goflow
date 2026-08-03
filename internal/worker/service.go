@@ -26,12 +26,17 @@ type Repository interface {
 	CompleteTaskAttempt(ctx context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error)
 }
 
+type Scheduler interface {
+	QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) error
+}
+
 type Service struct {
 	config    ServiceConfig
 	consumer  queue.TaskConsumer
 	claimer   TaskRunClaimer
 	repo      Repository
 	executors ExecutorRegistry
+	scheduler Scheduler
 }
 
 func NewService(
@@ -40,13 +45,20 @@ func NewService(
 	claimer TaskRunClaimer,
 	repo Repository,
 	executors ExecutorRegistry,
+	scheduler ...Scheduler,
 ) *Service {
+	var schedulerInstance Scheduler
+	if len(scheduler) > 0 {
+		schedulerInstance = scheduler[0]
+	}
+
 	return &Service{
 		config:    config,
 		consumer:  consumer,
 		claimer:   claimer,
 		repo:      repo,
 		executors: executors,
+		scheduler: schedulerInstance,
 	}
 }
 
@@ -119,6 +131,12 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 
 	if _, err := s.repo.CompleteTaskAttempt(ctx, completeInput); err != nil {
 		return err
+	}
+
+	if s.scheduler != nil {
+		if err = s.scheduler.QueueRunnableTaskRuns(ctx, message.WorkflowRunID); err != nil {
+			return err
+		}
 	}
 
 	if err := s.consumer.AckTask(ctx, message.MessageID); err != nil {
