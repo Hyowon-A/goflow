@@ -18,6 +18,7 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
 - DAG scheduler queueing for root tasks and ready successors
+- Transactional task outbox publishing and recovery
 - Worker task-run claiming from `queued` to `running`
 - Worker task execution with task-attempt creation and completion
 - Idempotent workflow-run submission with `Idempotency-Key`
@@ -32,55 +33,37 @@ maintaining durable workflow state and supporting reliable failure recovery.
 
 ## Architecture
 
-```text
-Client
-  |
-  v
-GoFlow API
-  |
-  +--- PostgreSQL
-  |
-  +--- Redis Streams
-           |
-           v
-       Worker Pool
+```mermaid
+flowchart LR
+    Client --> API[GoFlow API]
+    API --> Postgres[(PostgreSQL)]
+    Postgres --> Outbox[Task outbox]
+    Outbox --> Redis[(Redis Streams)]
+    Redis --> Workers[Worker pool]
+    Workers --> Postgres
 ```
 
 PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams is the task-delivery boundary. The current implementation can
 publish task messages to a configured stream, consume them with Redis consumer
-groups, queue runnable task runs from DAG state, claim queued task runs in
-PostgreSQL, execute the task, persist a task attempt, and acknowledge Redis
-messages only after completion is persisted.
+groups, queue runnable task runs and matching outbox rows transactionally,
+recover unpublished outbox rows, claim queued task runs in PostgreSQL, execute
+the task, persist a task attempt, and acknowledge Redis messages only after
+completion is persisted.
 
-```text
-Redis XADD
-  |
-  v
-Redis stream message
-  |
-  v
-Worker XREADGROUP
-  |
-  v
-PostgreSQL claim: task_run queued -> running
-  |
-  v
-Load task definition and input
-  |
-  v
-Create task_attempt running
-  |
-  v
-Execute task
-  |
-  v
-Complete task_attempt and task_run
-  |
-  +-- outcome persisted --> Redis XACK --> message removed from pending
-  |
-  +-- persistence error -> no XACK ----> message remains pending
+```mermaid
+flowchart TD
+    RedisXADD[Redis XADD] --> Stream[Redis stream message]
+    Stream --> Read[Worker XREADGROUP]
+    Read --> Claim[PostgreSQL claim: queued to running]
+    Claim --> Load[Load task definition and input]
+    Load --> Attempt[Create running task_attempt]
+    Attempt --> Execute[Execute task]
+    Execute --> Complete[Persist task_attempt and task_run outcome]
+    Complete -->|success| Ack[Redis XACK]
+    Ack --> Removed[Message removed from pending]
+    Complete -->|persistence error| Pending[Message remains pending]
 ```
 
 Redis says which task run a worker should try. PostgreSQL decides whether that
@@ -93,21 +76,10 @@ runtime execution state.
 
 ![GoFlow database schema](docs/images/database-schema.png)
 
-Definition tables:
-
-- `workflows`
-- `tasks`
-- `task_dependencies`
-
-Execution tables:
-
-- `workflow_runs`
-- `task_runs`
-- `task_attempts`
-
 `workflow_runs` and `task_runs` store runtime inputs, outputs, statuses and
 timestamps. `task_attempts` stores individual retry attempts so failures are not
-overwritten by later retries.
+overwritten by later retries. `task_outbox_events` stores durable Redis publish
+work for queued task runs.
 
 The schema uses named primary keys, unique constraints, check constraints and
 composite foreign keys to prevent invalid cross-workflow dependencies and
@@ -118,8 +90,9 @@ mismatched task runs.
 Workflow dependencies form a directed acyclic graph. Dependency edges point from
 predecessor task to successor task.
 
-```text
-extract -> transform -> load
+```mermaid
+flowchart LR
+    extract --> transform --> load
 ```
 
 GoFlow validates dependency graphs before accepting new dependency edges. The
@@ -272,7 +245,6 @@ missing. Request logs include method, path, status, duration and request ID.
 - Broader idempotency cleanup and retention policy
 - Retry with exponential backoff
 - Dead-letter handling
-- Transactional outbox publishing
 - Worker heartbeat and lease recovery
 - Prometheus metrics
 - Grafana dashboards

@@ -148,6 +148,35 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./internal/httpserver ./internal/scheduler ./internal/worker ./internal/workflow`
 - Ran `go test ./...`
 
+## Day 11
+
+### AI-assisted work
+
+- Added `task_outbox_events` and repository methods for claiming, publishing and retrying task queue events
+- Moved runnable task-run queueing and outbox row creation into one PostgreSQL transaction
+- Added an outbox dispatcher that publishes the existing Redis task message schema and records Redis message IDs
+- Wired API and worker scheduling to run one dispatcher pass after durable scheduling commits
+- Added worker-command periodic dispatcher passes for crash-before-publish recovery
+- Added tests for outbox constraints, repository claiming, dispatcher retry behavior, API recovery and worker acknowledgement ordering
+
+### Accepted suggestions
+
+- Kept PostgreSQL as the reliability boundary and Redis as the delivery boundary
+- Kept Redis task messages small and unchanged
+- Used repeated dispatcher passes instead of a job framework
+- Logged dispatch failures after commit without failing workflow-run creation
+
+### Rejected suggestions
+
+- Rejected retries, dead-letter handling, leases and metrics during Day 11
+- Rejected a separate outbox process before the worker-side recovery loop proves insufficient
+- Rejected embedding generic JSON payloads in the outbox while explicit task-message columns are enough
+
+### Validation performed
+
+- Ran `go test ./internal/worker ./internal/queue ./internal/scheduler`
+- Ran `go test ./...`
+
 ## Day 3
 
 ### AI-assisted work

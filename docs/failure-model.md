@@ -79,6 +79,29 @@ run. Executor errors, unknown executor types and explicit executor failure
 reasons complete both records as failed. Redis acknowledgement happens only
 after the completion update succeeds.
 
+The task outbox only protects scheduler-to-Redis delivery. It records queued
+task messages in the same PostgreSQL transaction as the task-run state change,
+then publishes them later and marks the row `published` after Redis accepts the
+message. Worker acknowledgement remains tied to persisted task completion, not
+outbox publication, and task side effects must still be idempotent.
+
+```mermaid
+sequenceDiagram
+    participant Scheduler
+    participant Postgres as PostgreSQL
+    participant Dispatcher
+    participant Redis
+    participant Worker
+
+    Scheduler->>Postgres: queue task_run and insert outbox row
+    Dispatcher->>Postgres: claim pending outbox row
+    Dispatcher->>Redis: XADD task message
+    Dispatcher->>Postgres: mark outbox row published
+    Worker->>Redis: XREADGROUP task message
+    Worker->>Postgres: persist task completion
+    Worker->>Redis: XACK only after completion persists
+```
+
 Duplicate queue messages are handled at the PostgreSQL claim boundary. If a
 task run is already `running`, `completed`, `failed` or `dead_letter`, the
 worker acknowledges the duplicate Redis message without creating another

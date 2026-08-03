@@ -54,7 +54,8 @@ execution data, creates a task attempt, runs the executor, completes the
 attempt and task run, and acknowledges only after completion is persisted. They
 also verify duplicate queue messages for already-owned or terminal task runs
 are acknowledged without creating another attempt and emit structured duplicate
-message logs.
+message logs. The acknowledgement tests assert the ordering explicitly:
+PostgreSQL completion first, successor scheduling second, Redis ack last.
 
 Worker executor tests cover the built-in `sleep`, `log` and `random_fail`
 executors. Worker service integration tests use PostgreSQL with fake queue
@@ -65,7 +66,10 @@ Scheduler tests use fake publishers for publish coordination and PostgreSQL
 integration tests for runnable-task selection. A worker/scheduler integration
 test runs an `A -> B, C -> D` workflow with real PostgreSQL and an in-memory
 queue to prove fan-out and fan-in progress without requiring Redis. Scheduler
-tests also verify no-op scheduling logs when no task runs changed state.
+tests also verify no-op scheduling logs when no task runs changed state. Outbox
+tests cover transactional outbox row creation, concurrent claiming, publish
+failure retry visibility, and crash-before-publish recovery with a fake
+publisher.
 
 ## Current Coverage
 
@@ -96,6 +100,8 @@ tests also verify no-op scheduling logs when no task runs changed state.
 - Transactional dependency creation with graph validation before insert
 - Queue configuration defaults and validation
 - Task queue message schema validation
+- Task queue parsing with the same small Redis message schema after outbox
+  changes
 - Redis Streams publisher integration with real Redis when available
 - Redis Streams consumer group setup and acknowledgement behavior
 - Conditional task-run claiming from `queued` to `running`
@@ -105,6 +111,7 @@ tests also verify no-op scheduling logs when no task runs changed state.
 - Worker receive, claim, execute, complete and acknowledgement coordination
 - Duplicate queue-message acknowledgement and logging
 - Scheduler queueing for runnable task runs
+- Transactional task outbox row creation and dispatcher recovery
 - Fan-out and fan-in DAG scheduling
 - Duplicate scheduler calls do not queue the same task run twice
 - Scheduler no-op logging when no runnable task runs changed state

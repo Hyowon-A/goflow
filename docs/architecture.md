@@ -6,25 +6,19 @@ GoFlow is a general-purpose distributed workflow orchestration engine written in
 
 It will execute dependency-based tasks across multiple workers while maintaining durable workflow state and supporting failure recovery.
 
-## Planned Architecture
+## Architecture Overview
 
-```text
-Client
-  |
-  v
-GoFlow API
-  |
-  +--- PostgreSQL
-  |      - workflow definitions
-  |      - workflow runs
-  |      - task runs
-  |      - retry history
-  |      - outbox events
-  |
-  +--- Redis Streams
-           |
-           v
-       Worker Pool
+```mermaid
+flowchart LR
+    Client --> API[GoFlow API]
+    API --> Postgres[(PostgreSQL)]
+    Postgres --> Definitions[Workflow definitions]
+    Postgres --> Runs[Workflow and task runs]
+    Postgres --> Attempts[Task attempts]
+    Postgres --> Outbox[Task outbox events]
+    Outbox --> Redis[(Redis Streams)]
+    Redis --> Workers[Worker pool]
+    Workers --> Postgres
 ```
 
 ## Database Schema
@@ -66,27 +60,20 @@ Workflow definitions are modeled as directed acyclic graphs. Tasks are graph
 nodes and `task_dependencies` rows are directed edges from predecessor task to
 successor task.
 
-```text
-extract
-  |
-  v
-transform
-  |
-  v
-load
+```mermaid
+flowchart TD
+    extract --> transform --> load
 ```
 
 Fan-out, fan-in, multiple roots, multiple leaves and disconnected components are
 valid. Disconnected components are treated as separate runnable branches of the
 same workflow definition.
 
-```text
-extract        enrich
-  |              |
-  v              v
-transform      publish
-
-aggregate ----> notify
+```mermaid
+flowchart TD
+    extract --> transform
+    enrich --> publish
+    aggregate --> notify
 ```
 
 Graph invariants:
@@ -154,53 +141,31 @@ are tested against the PostgreSQL enum definitions in
 The API layer keeps HTTP concerns separate from workflow business logic and
 PostgreSQL persistence.
 
-```text
-HTTP client
-  |
-  v
-chi router
-  |
-  +-- request ID middleware
-  |     - reads or generates X-Request-ID
-  |
-  +-- logging middleware
-  |     - logs method, path, status, duration and request_id
-  |
-  v
-HTTP handler
-  |
-  +-- decode JSON request body
-  +-- validate required fields and UUID path params
-  +-- convert request DTO into workflow input
-  |
-  v
-workflow service
-  |
-  +-- trim and validate application inputs
-  +-- enforce workflow-level rules
-  +-- call repository interface
-  |
-  v
-PostgreSQL repository
-  |
-  +-- execute parameterised SQL with context.Context
-  +-- use transactions where multiple records must be created together
-  +-- translate PostgreSQL constraint errors into workflow errors
-  |
-  v
-PostgreSQL
+```mermaid
+flowchart TD
+    Client[HTTP client] --> Router[chi router]
+    Router --> RequestID[Request ID middleware]
+    RequestID --> Logging[Logging middleware]
+    Logging --> Handler[HTTP handler]
+    Handler --> Service[workflow service]
+    Service --> Repo[PostgreSQL repository]
+    Repo --> Postgres[(PostgreSQL)]
 ```
 
 Example for `POST /workflows/{workflowID}/tasks`:
 
-```text
-createTask handler
-  -> validate workflowID is a UUID
-  -> decode createTaskRequest
-  -> call workflow.Service.CreateTask
-  -> call PostgresRepository.CreateTask
-  -> INSERT INTO tasks
-  -> return taskResponse with 201 Created
+```mermaid
+sequenceDiagram
+    participant Handler as createTask handler
+    participant Service as workflow.Service
+    participant Repo as PostgresRepository
+    participant Postgres as PostgreSQL
+
+    Handler->>Handler: validate workflowID and JSON body
+    Handler->>Service: CreateTask
+    Service->>Repo: CreateTask
+    Repo->>Postgres: INSERT INTO tasks
+    Postgres-->>Handler: taskResponse with 201 Created
 ```
 
 Handlers own transport details such as JSON, HTTP status codes, request IDs and
@@ -268,24 +233,14 @@ with `XREADGROUP` using the worker ID as the Redis consumer name. Empty reads
 return a stable no-message result so workers can poll while still respecting
 shutdown.
 
-```text
-                     Redis Stream: goflow:tasks
-        +------------------------------------------------+
-        | 178...-0  workflow_run_id=... task_run_id=A    |
-        | 179...-0  workflow_run_id=... task_run_id=B    |
-        | 180...-0  workflow_run_id=... task_run_id=C    |
-        +------------------------------------------------+
-                             |
-                             v
-                Consumer Group: goflow-workers
-                             |
-             +---------------+---------------+
-             |                               |
-             v                               v
-       worker-1 XREADGROUP             worker-2 XREADGROUP
-             |                               |
-             v                               v
-       receives task_run A             receives task_run B
+```mermaid
+flowchart TD
+    Stream[(Redis stream: goflow:tasks)]
+    Stream --> Group[Consumer group: goflow-workers]
+    Group --> W1[worker-1 XREADGROUP]
+    Group --> W2[worker-2 XREADGROUP]
+    W1 --> A[receives task_run A]
+    W2 --> B[receives task_run B]
 ```
 
 Consumer groups prevent every worker from receiving every new message. Within a
@@ -320,45 +275,19 @@ current worker flow processes one message at a time:
 7. Complete the task attempt and task run as `completed` or `failed`.
 8. Acknowledge the Redis message only after completion is persisted.
 
-```text
-Redis stream entry
-  |
-  | XREADGROUP GROUP goflow-workers worker-1 STREAMS goflow:tasks >
-  v
-Redis pending entry
-  |
-  | UPDATE task_runs
-  | SET status = 'running'
-  | WHERE id = task_run_id
-  |   AND status = 'queued'
-  v
-PostgreSQL claim result
-  |
-  +-- claim succeeds
-  |      |
-  |      v
-  |    Load task + create attempt
-  |      |
-  |      v
-  |    Executor.Execute
-  |      |
-  |      v
-  |    CompleteTaskAttempt
-  |      |
-  |      v
-  |    XACK goflow:tasks goflow-workers message_id
-  |      |
-  |      v
-  |    Redis pending entry removed
-  |
-  +-- claim fails
-         |
-         v
-       Load current task-run status
-         |
-         +-- running/completed/failed/dead_letter: XACK duplicate
-         |
-         +-- missing/other error/pending/retry_wait: no XACK
+```mermaid
+flowchart TD
+    Entry[Redis stream entry] --> Read[XREADGROUP]
+    Read --> Pending[Redis pending entry]
+    Pending --> Claim[PostgreSQL claim queued to running]
+    Claim -->|succeeds| Work[Load task and create attempt]
+    Work --> Execute[Executor.Execute]
+    Execute --> Complete[CompleteTaskAttempt]
+    Complete --> Ack[XACK message_id]
+    Ack --> Removed[Redis pending entry removed]
+    Claim -->|fails| Status[Load current task-run status]
+    Status -->|running/completed/failed/dead_letter| AckDuplicate[XACK duplicate]
+    Status -->|missing/error/pending/retry_wait| NoAck[No XACK]
 ```
 
 If the claim fails, the worker checks PostgreSQL before acknowledging. Messages
@@ -378,28 +307,28 @@ Built-in executors are intentionally small:
 | `log` | Logs a message from task config or task-run input and returns it as output. |
 | `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
 
-Pending-message recovery, leases, retries and dead-letter handling remain
+Redis pending-message recovery, leases, retries and dead-letter handling remain
 future work.
 
 ## DAG Scheduling
 
 The scheduler is a small coordinator between PostgreSQL workflow state and the
-queue publisher. It asks the workflow repository to move runnable task runs
-from `pending` to `queued`, then publishes one Redis task message for each row
-returned by that update.
+task outbox. It asks the workflow repository to move runnable task runs from
+`pending` to `queued` and write matching outbox rows in the same transaction.
+The dispatcher publishes pending outbox rows to Redis and marks them
+`published` only after `XADD` succeeds.
 
-```text
-workflow run created or task completed
-  |
-  v
-UPDATE task_runs
-SET status = 'queued'
-WHERE status = 'pending'
-  AND all predecessor task runs are completed
-RETURNING task_run identifiers
-  |
-  v
-Publish one Redis message per returned task run
+```mermaid
+flowchart TD
+    Trigger[Workflow run created or task completed] --> Tx[PostgreSQL transaction]
+    Tx --> Queue[Queue runnable task_runs]
+    Queue --> Outbox[Insert task_outbox_events]
+    Outbox --> Commit[Commit]
+    Commit --> Dispatch[Outbox dispatcher claims pending rows]
+    Dispatch --> Publish[Publish Redis task message]
+    Publish -->|XADD succeeds| Published[Mark outbox row published]
+    Publish -->|XADD fails| Retry[Record last_error and leave retryable]
+    Retry --> Dispatch
 ```
 
 Root tasks are handled by the same query because they have no predecessor rows.
@@ -411,5 +340,6 @@ workflow run ID and reason.
 
 The API triggers root scheduling after workflow-run creation commits. Worker
 completion can call the same scheduler path to release newly ready successors.
-Until the Day 11 outbox exists, GoFlow still has a dual-write gap: a task run
-may be moved to `queued` in PostgreSQL and then fail to publish to Redis.
+Synchronous dispatch is an optimization. The recovery boundary is the durable
+outbox row, so a later dispatcher pass can publish rows left behind by a crash
+or Redis outage.
