@@ -108,3 +108,23 @@ type TaskRunExecution struct {
 	Config        map[string]any
 	TaskRunInput  map[string]any
 }
+
+type TaskOutboxEvent struct {
+	ID            string
+	WorkflowID    string
+	WorkflowRunID string
+	TaskID        string
+	TaskRunID     string
+	AttemptCount  int
+	Status        string
+}
+
+type MarkTaskOutboxEventPublishedInput struct {
+	EventID        string
+	RedisMessageID string
+}
+
+type RecordTaskOutboxEventFailureInput struct {
+	EventID   string
+	LastError string
+}

@@ -266,7 +266,13 @@ func (r *PostgresRepository) QueueRunnableTaskRuns(ctx context.Context, workflow
 		return []TaskRun{}, ErrWorkflowRunNotFound
 	}
 
-	rows, err := r.db.Query(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return []TaskRun{}, fmt.Errorf("begin queue runnable task run: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
 		UPDATE task_runs tr
 		SET status = $2
 		WHERE tr.workflow_run_id = $1
@@ -304,6 +310,21 @@ func (r *PostgresRepository) QueueRunnableTaskRuns(ctx context.Context, workflow
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate queued runnable task runs: %w", err)
+	}
+	rows.Close()
+
+	for _, tr := range taskRuns {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id)
+			VALUES ($1, $2, $3, $4, $5)
+		`, uuid.NewString(), tr.WorkflowID, tr.WorkflowRunID, tr.TaskID, tr.ID)
+		if err != nil {
+			return nil, fmt.Errorf("create task outbox event: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit queue runnable task runs: %w", err)
 	}
 
 	return taskRuns, nil

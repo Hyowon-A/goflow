@@ -48,6 +48,23 @@ func TestPostgresRepositoryQueueRunnableTaskRunsQueuesOnlyUnblockedPendingTasks(
 	if len(queuedAgain) != 0 {
 		t.Fatalf("expected idempotent second queue to return no rows, got %#v", queuedAgain)
 	}
+	assertTaskOutboxEventCount(t, pool, queued[0].ID, 1)
+}
+
+func TestPostgresRepositoryQueueRunnableTaskRunsCreatesRootOutboxEvent(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableRoots(t, pool, 1)
+	repo := NewPostgresRepository(pool)
+
+	queued, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err != nil {
+		t.Fatalf("queue root task run: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("expected one queued root task run, got %#v", queued)
+	}
+
+	assertTaskOutboxEvent(t, pool, queued[0])
 }
 
 func TestPostgresRepositoryQueueRunnableTaskRunsRejectsBlankWorkflowRunID(t *testing.T) {
@@ -73,6 +90,7 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	if got := taskIDs(queued); !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected B and C to queue after A, got %#v", got)
 	}
+	assertWorkflowRunOutboxEventCount(t, pool, fixture.workflowRunID, 2)
 	assertTaskRunStatuses(t, pool, fixture.workflowRunID, map[string]TaskRunStatus{
 		fixture.taskIDs["A"]: TaskRunStatusCompleted,
 		fixture.taskIDs["B"]: TaskRunStatusQueued,
@@ -97,6 +115,7 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	if got := taskIDs(queued); !reflect.DeepEqual(got, []string{fixture.taskIDs["D"]}) {
 		t.Fatalf("expected D to queue after B and C complete, got %#v", got)
 	}
+	assertWorkflowRunOutboxEventCount(t, pool, fixture.workflowRunID, 3)
 
 	queued, err = repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
 	if err != nil {
@@ -105,6 +124,7 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	if len(queued) != 0 {
 		t.Fatalf("expected duplicate successor scheduling to return no rows, got %#v", queued)
 	}
+	assertWorkflowRunOutboxEventCount(t, pool, fixture.workflowRunID, 3)
 }
 
 func TestPostgresRepositoryQueueRunnableTaskRunsConcurrentCallsQueueEachTaskOnce(t *testing.T) {
@@ -149,6 +169,30 @@ func TestPostgresRepositoryQueueRunnableTaskRunsConcurrentCallsQueueEachTaskOnce
 	if len(seen) != 2 {
 		t.Fatalf("expected two unique queued task runs, got %#v", seen)
 	}
+	assertWorkflowRunOutboxEventCount(t, pool, fixture.workflowRunID, 2)
+}
+
+func TestPostgresRepositoryQueueRunnableTaskRunsRollsBackWhenOutboxInsertFails(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableRoots(t, pool, 1)
+	repo := NewPostgresRepository(pool)
+
+	var taskID string
+	for _, id := range fixture.taskIDs {
+		taskID = id
+	}
+	taskRunID := taskRunIDByTask(t, pool, fixture.workflowRunID, taskID)
+	insertPendingTaskOutboxEvent(t, pool, fixture.workflowID, fixture.workflowRunID, taskID, taskRunID)
+
+	_, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err == nil {
+		t.Fatal("expected outbox insert error")
+	}
+
+	assertTaskRunStatuses(t, pool, fixture.workflowRunID, map[string]TaskRunStatus{
+		taskID: TaskRunStatusPending,
+	})
+	assertTaskOutboxEventCount(t, pool, taskRunID, 1)
 }
 
 type runnableTaskRunsFixture struct {
@@ -225,6 +269,7 @@ func seedRunnableTaskRuns(t *testing.T, pool *pgxpool.Pool) runnableTaskRunsFixt
 	}
 
 	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM task_outbox_events WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, fixture.workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, fixture.workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM workflow_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, fixture.workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_dependencies WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, fixture.workflowName)
@@ -373,6 +418,7 @@ func seedWorkflowRunGraph(
 	}
 
 	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM task_outbox_events WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM workflow_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, workflowName)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_dependencies WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, workflowName)
@@ -409,5 +455,88 @@ func setTaskRunStatus(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID st
 	`, workflowRunID, taskID, status)
 	if err != nil {
 		t.Fatalf("set task run status: %v", err)
+	}
+}
+
+func assertTaskOutboxEvent(t *testing.T, pool *pgxpool.Pool, taskRun TaskRun) {
+	t.Helper()
+
+	var workflowID, workflowRunID, taskID, status, eventType string
+	err := pool.QueryRow(context.Background(), `
+		SELECT workflow_id, workflow_run_id, task_id, status, event_type
+		FROM task_outbox_events
+		WHERE task_run_id = $1
+	`, taskRun.ID).Scan(&workflowID, &workflowRunID, &taskID, &status, &eventType)
+	if err != nil {
+		t.Fatalf("load task outbox event: %v", err)
+	}
+
+	if workflowID != taskRun.WorkflowID || workflowRunID != taskRun.WorkflowRunID || taskID != taskRun.TaskID {
+		t.Fatalf("outbox event does not match task run: got workflow=%s run=%s task=%s, want %#v", workflowID, workflowRunID, taskID, taskRun)
+	}
+	if status != "pending" || eventType != "task_run_queued" {
+		t.Fatalf("unexpected outbox event state: status=%q event_type=%q", status, eventType)
+	}
+}
+
+func assertTaskOutboxEventCount(t *testing.T, pool *pgxpool.Pool, taskRunID string, want int) {
+	t.Helper()
+
+	var got int
+	err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM task_outbox_events
+		WHERE task_run_id = $1
+	`, taskRunID).Scan(&got)
+	if err != nil {
+		t.Fatalf("count task outbox events: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %d task outbox events, got %d", want, got)
+	}
+}
+
+func assertWorkflowRunOutboxEventCount(t *testing.T, pool *pgxpool.Pool, workflowRunID string, want int) {
+	t.Helper()
+
+	var got int
+	err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM task_outbox_events
+		WHERE workflow_run_id = $1
+	`, workflowRunID).Scan(&got)
+	if err != nil {
+		t.Fatalf("count workflow run outbox events: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %d workflow-run outbox events, got %d", want, got)
+	}
+}
+
+func taskRunIDByTask(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID string) string {
+	t.Helper()
+
+	var taskRunID string
+	err := pool.QueryRow(context.Background(), `
+		SELECT id
+		FROM task_runs
+		WHERE workflow_run_id = $1
+			AND task_id = $2
+	`, workflowRunID, taskID).Scan(&taskRunID)
+	if err != nil {
+		t.Fatalf("load task run id: %v", err)
+	}
+	return taskRunID
+}
+
+func insertPendingTaskOutboxEvent(t *testing.T, pool *pgxpool.Pool, workflowID, workflowRunID, taskID, taskRunID string) {
+	t.Helper()
+
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id)
+		VALUES ($1, $2, $3, $4, $5)
+	`, uuid.NewString(), workflowID, workflowRunID, taskID, taskRunID)
+	if err != nil {
+		t.Fatalf("insert pending task outbox event: %v", err)
 	}
 }

@@ -22,5 +22,6 @@ var (
 	ErrTaskAttemptAlreadyExists = errors.New("task_attempt_already_exists")
 	ErrTaskAttemptNotFound      = errors.New("task_attempt_not_found")
 	ErrTaskRunExecutionNotFound = errors.New("task_run_execution_not_found")
+	ErrTaskOutboxEventNotFound  = errors.New("task_outbox_event_not_found")
 	ErrIdempotencyConflict      = errors.New("idempotency_conflict")
 )

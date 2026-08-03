@@ -18,6 +18,7 @@ const (
 	defaultWorkflowClaimTestDatabaseURL = "postgres://goflow:goflow@localhost:5433/goflow?sslmode=disable"
 	workflowClaimMigrationPath          = "../../migrations/001_initial_schema.up.sql"
 	workflowClaimIdempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
+	workflowClaimOutboxPath             = "../../migrations/003_task_outbox_events.up.sql"
 )
 
 var (
@@ -86,6 +87,10 @@ func setupWorkflowClaimTestDatabase(ctx context.Context) (*pgxpool.Pool, error) 
 		pool.Close()
 		return nil, err
 	}
+	if err := ensureWorkflowClaimOutboxSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return pool, nil
 }
@@ -134,6 +139,45 @@ func ensureWorkflowClaimIdempotencySchema(ctx context.Context, pool *pgxpool.Poo
 		ALTER TABLE workflow_runs
 			ADD CONSTRAINT chk_workflow_runs_idempotency_hash
 			CHECK (idempotency_key IS NULL OR request_hash IS NOT NULL)
+	`)
+	return err
+}
+
+func ensureWorkflowClaimOutboxSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var tableExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public'
+				AND table_name = 'task_outbox_events'
+		)
+	`).Scan(&tableExists)
+	if err != nil || tableExists {
+		if err != nil {
+			return err
+		}
+		return ensureWorkflowClaimOutboxClaimSchema(ctx, pool)
+	}
+
+	migrationSQL, err := os.ReadFile(workflowClaimOutboxPath)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, string(migrationSQL))
+	return err
+}
+
+func ensureWorkflowClaimOutboxClaimSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+		ALTER TABLE task_outbox_events
+			DROP CONSTRAINT IF EXISTS chk_task_outbox_events_status;
+		ALTER TABLE task_outbox_events
+			ADD CONSTRAINT chk_task_outbox_events_status
+			CHECK (status IN ('pending', 'publishing', 'published'));
+		DROP INDEX IF EXISTS uq_task_outbox_events_unpublished_task_run;
+		CREATE UNIQUE INDEX uq_task_outbox_events_unpublished_task_run
+			ON task_outbox_events (task_run_id, event_type)
+			WHERE status <> 'published';
 	`)
 	return err
 }
