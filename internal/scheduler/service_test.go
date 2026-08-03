@@ -13,11 +13,15 @@ import (
 	"github.com/Hyowon-A/goflow/internal/workflow"
 )
 
-func TestServiceQueueRunnableTaskRunsPublishesReturnedTaskRuns(t *testing.T) {
+func TestServiceQueueRunnableTaskRunsDispatchesOutboxEvents(t *testing.T) {
 	repo := &fakeRepository{
 		taskRuns: []workflow.TaskRun{
 			{ID: "task-run-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1"},
 			{ID: "task-run-2", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-2"},
+		},
+		outboxEvents: []workflow.TaskOutboxEvent{
+			{ID: "event-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"},
+			{ID: "event-2", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-2", TaskRunID: "task-run-2"},
 		},
 	}
 	publisher := &fakePublisher{}
@@ -38,16 +42,20 @@ func TestServiceQueueRunnableTaskRunsPublishesReturnedTaskRuns(t *testing.T) {
 	if !reflect.DeepEqual(publisher.messages, want) {
 		t.Fatalf("unexpected published messages: got %#v, want %#v", publisher.messages, want)
 	}
+	if len(repo.published) != 2 {
+		t.Fatalf("expected two outbox events marked published, got %#v", repo.published)
+	}
 }
 
-func TestServiceQueueRunnableTaskRunsPublishesNothingWhenNoRowsChanged(t *testing.T) {
+func TestServiceQueueRunnableTaskRunsDispatchesNothingWhenNoRowsChanged(t *testing.T) {
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
+	repo := &fakeRepository{}
 	publisher := &fakePublisher{}
-	service := NewService(&fakeRepository{}, publisher)
+	service := NewService(repo, publisher)
 
 	err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run")
 	if err != nil {
@@ -55,6 +63,9 @@ func TestServiceQueueRunnableTaskRunsPublishesNothingWhenNoRowsChanged(t *testin
 	}
 	if len(publisher.messages) != 0 {
 		t.Fatalf("expected no published messages, got %#v", publisher.messages)
+	}
+	if repo.claims != 0 {
+		t.Fatalf("expected no outbox claim when no rows changed, got %d", repo.claims)
 	}
 	logOutput := logs.String()
 	for _, want := range []string{
@@ -68,10 +79,14 @@ func TestServiceQueueRunnableTaskRunsPublishesNothingWhenNoRowsChanged(t *testin
 	}
 }
 
-func TestServiceQueueRunnableTaskRunsPublishesOnlyRowsChangedAcrossDuplicateCalls(t *testing.T) {
+func TestServiceQueueRunnableTaskRunsDispatchesOnlyRowsChangedAcrossDuplicateCalls(t *testing.T) {
 	repo := &fakeRepository{
 		batches: [][]workflow.TaskRun{
 			{{ID: "task-run-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1"}},
+			nil,
+		},
+		outboxBatches: [][]workflow.TaskOutboxEvent{
+			{{ID: "event-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"}},
 			nil,
 		},
 	}
@@ -91,56 +106,60 @@ func TestServiceQueueRunnableTaskRunsPublishesOnlyRowsChangedAcrossDuplicateCall
 	if !reflect.DeepEqual(publisher.messages, want) {
 		t.Fatalf("expected duplicate scheduler call to publish only changed rows, got %#v", publisher.messages)
 	}
+	if len(repo.published) != 1 {
+		t.Fatalf("expected one outbox event marked published, got %#v", repo.published)
+	}
 }
 
 func TestServiceQueueRunnableTaskRunsReturnsErrors(t *testing.T) {
-	tests := []struct {
-		name          string
-		repo          *fakeRepository
-		publisher     *fakePublisher
-		wantErr       error
-		wantPublishes int
-	}{
-		{
-			name:    "repository error",
-			wantErr: errors.New("repo failed"),
-		},
-		{
-			name: "publish error",
-			repo: &fakeRepository{taskRuns: []workflow.TaskRun{
-				{ID: "task-run", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task"},
-			}},
-			wantErr:       errors.New("publish failed"),
-			wantPublishes: 1,
-		},
+	wantErr := errors.New("repo failed")
+	service := NewService(&fakeRepository{err: wantErr}, &fakePublisher{})
+
+	err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.repo == nil {
-				tt.repo = &fakeRepository{err: tt.wantErr}
-			}
-			if tt.publisher == nil {
-				tt.publisher = &fakePublisher{err: tt.wantErr}
-			}
-			service := NewService(tt.repo, tt.publisher)
+func TestServiceQueueRunnableTaskRunsLogsAndIgnoresDispatchErrorsAfterQueueCommit(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-			err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run")
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("expected %v, got %v", tt.wantErr, err)
-			}
-			if len(tt.publisher.messages) != tt.wantPublishes {
-				t.Fatalf("expected %d publish attempts, got %#v", tt.wantPublishes, tt.publisher.messages)
-			}
-		})
+	repo := &fakeRepository{
+		taskRuns: []workflow.TaskRun{
+			{ID: "task-run", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task"},
+		},
+		claimErr: errors.New("claim failed"),
+	}
+	service := NewService(repo, &fakePublisher{})
+
+	if err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run"); err != nil {
+		t.Fatalf("expected dispatch error to be logged, got %v", err)
+	}
+	for _, want := range []string{
+		`"msg":"task_outbox_dispatch_failed"`,
+		`"workflow_run_id":"workflow-run"`,
+		`"error":"claim failed"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("expected log output to contain %s, got %s", want, logs.String())
+		}
 	}
 }
 
 type fakeRepository struct {
 	taskRuns       []workflow.TaskRun
 	batches        [][]workflow.TaskRun
+	outboxEvents   []workflow.TaskOutboxEvent
+	outboxBatches  [][]workflow.TaskOutboxEvent
 	err            error
+	claimErr       error
 	workflowRunIDs []string
+	claims         int
+	published      []workflow.MarkTaskOutboxEventPublishedInput
+	failures       []workflow.RecordTaskOutboxEventFailureInput
 }
 
 func (r *fakeRepository) QueueRunnableTaskRuns(_ context.Context, workflowRunID string) ([]workflow.TaskRun, error) {
@@ -154,6 +173,29 @@ func (r *fakeRepository) QueueRunnableTaskRuns(_ context.Context, workflowRunID 
 		return taskRuns, nil
 	}
 	return r.taskRuns, nil
+}
+
+func (r *fakeRepository) ClaimPendingTaskOutboxEvents(context.Context) ([]workflow.TaskOutboxEvent, error) {
+	r.claims++
+	if r.claimErr != nil {
+		return nil, r.claimErr
+	}
+	if len(r.outboxBatches) > 0 {
+		events := r.outboxBatches[0]
+		r.outboxBatches = r.outboxBatches[1:]
+		return events, nil
+	}
+	return r.outboxEvents, nil
+}
+
+func (r *fakeRepository) MarkTaskOutboxEventPublished(_ context.Context, input workflow.MarkTaskOutboxEventPublishedInput) error {
+	r.published = append(r.published, input)
+	return nil
+}
+
+func (r *fakeRepository) RecordTaskOutboxEventFailure(_ context.Context, input workflow.RecordTaskOutboxEventFailureInput) error {
+	r.failures = append(r.failures, input)
+	return nil
 }
 
 type fakePublisher struct {

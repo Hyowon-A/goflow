@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"time"
 
 	"github.com/Hyowon-A/goflow/internal/database"
+	"github.com/Hyowon-A/goflow/internal/queue"
+	"github.com/Hyowon-A/goflow/internal/scheduler"
+	"github.com/Hyowon-A/goflow/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,6 +27,7 @@ const (
 	defaultWorkflowAPITestDatabaseURL = "postgres://goflow:goflow@localhost:5433/goflow?sslmode=disable"
 	workflowAPIMigrationPath          = "../../migrations/001_initial_schema.up.sql"
 	workflowAPIIdempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
+	workflowAPIOutboxPath             = "../../migrations/003_task_outbox_events.up.sql"
 )
 
 var (
@@ -91,6 +96,10 @@ func setupWorkflowAPITestDatabase(ctx context.Context) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := ensureWorkflowAPIOutboxSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return pool, nil
 }
@@ -143,6 +152,41 @@ func ensureWorkflowAPIIdempotencySchema(ctx context.Context, pool *pgxpool.Pool)
 	return err
 }
 
+func ensureWorkflowAPIOutboxSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var tableExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public'
+				AND table_name = 'task_outbox_events'
+		)
+	`).Scan(&tableExists)
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		migrationSQL, err := os.ReadFile(workflowAPIOutboxPath)
+		if err != nil {
+			return err
+		}
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		return err
+	}
+
+	_, err = pool.Exec(ctx, `
+		ALTER TABLE task_outbox_events
+			DROP CONSTRAINT IF EXISTS chk_task_outbox_events_status;
+		ALTER TABLE task_outbox_events
+			ADD CONSTRAINT chk_task_outbox_events_status
+			CHECK (status IN ('pending', 'publishing', 'published'));
+		DROP INDEX IF EXISTS uq_task_outbox_events_unpublished_task_run;
+		CREATE UNIQUE INDEX uq_task_outbox_events_unpublished_task_run
+			ON task_outbox_events (task_run_id, event_type)
+			WHERE status <> 'published';
+	`)
+	return err
+}
+
 func workflowAPIHandler(t *testing.T) (*pgxpool.Pool, http.Handler) {
 	t.Helper()
 
@@ -185,6 +229,7 @@ func cleanupWorkflowByName(t *testing.T, pool *pgxpool.Pool, name string) {
 				WHERE workflow_id IN (SELECT id FROM target_workflows)
 			)
 		`, name)
+		_, _ = pool.Exec(ctx, `DELETE FROM task_outbox_events WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, name)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, name)
 		_, _ = pool.Exec(ctx, `DELETE FROM workflow_runs WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, name)
 		_, _ = pool.Exec(ctx, `DELETE FROM task_dependencies WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, name)
@@ -904,6 +949,43 @@ func TestWorkflowRunCreationTriggersScheduler(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunCreationReturnsCreatedWhenOutboxDispatchFailsAndLaterRecovers(t *testing.T) {
+	pool := workflowAPITestPool(t)
+	repo := workflow.NewPostgresRepository(pool)
+	publishErr := errors.New("redis unavailable")
+	failingPublisher := &workflowAPIPublisher{err: publishErr}
+	handler := New(pool, scheduler.NewService(repo, failingPublisher)).Handler()
+
+	workflowName := uniqueWorkflowName("day11-outbox-recovery")
+	cleanupWorkflowByName(t, pool, workflowName)
+
+	workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+	createTaskThroughAPI(t, handler, workflowID, "extract")
+
+	response := postJSON(t, handler, "/workflows/"+workflowID+"/runs", map[string]any{
+		"input": map[string]any{"document_id": "doc-outbox-recovery"},
+	}, "")
+	expectStatus(t, response, http.StatusCreated)
+
+	body := decodeJSONBody(t, response)
+	workflowRunID := expectStringField(t, body, "id")
+	if len(failingPublisher.messages) != 1 {
+		t.Fatalf("expected one failed publish attempt, got %#v", failingPublisher.messages)
+	}
+	assertTaskOutboxEventState(t, pool, workflowRunID, "pending", publishErr.Error(), "", false)
+
+	recoveryPublisher := &workflowAPIPublisher{}
+	dispatcher := scheduler.NewOutboxDispatcher(repo, recoveryPublisher)
+	if err := dispatcher.DispatchPendingTaskOutboxEvents(context.Background()); err != nil {
+		t.Fatalf("dispatch recovered task outbox event: %v", err)
+	}
+
+	if len(recoveryPublisher.messages) != 1 {
+		t.Fatalf("expected one recovered publish, got %#v", recoveryPublisher.messages)
+	}
+	assertTaskOutboxEventState(t, pool, workflowRunID, "published", "", "message-id", true)
+}
+
 func TestWorkflowRunStartsWithoutTaskAttempts(t *testing.T) {
 	pool, handler := workflowAPIHandler(t)
 
@@ -943,6 +1025,43 @@ func TestWorkflowRunStartsWithoutTaskAttempts(t *testing.T) {
 	}
 	if attemptCount != 0 {
 		t.Fatalf("expected workflow run creation to create 0 task attempts, got %d", attemptCount)
+	}
+}
+
+type workflowAPIPublisher struct {
+	messages []queue.TaskMessage
+	err      error
+}
+
+func (p *workflowAPIPublisher) PublishTask(_ context.Context, message queue.TaskMessage) (string, error) {
+	p.messages = append(p.messages, message)
+	if p.err != nil {
+		return "", p.err
+	}
+	return "message-id", nil
+}
+
+func assertTaskOutboxEventState(t *testing.T, pool *pgxpool.Pool, workflowRunID, wantStatus, wantLastError, wantRedisMessageID string, wantPublished bool) {
+	t.Helper()
+
+	var status, lastError, redisMessageID string
+	var published bool
+	err := pool.QueryRow(context.Background(), `
+		SELECT status, COALESCE(last_error, ''), COALESCE(redis_message_id, ''), published_at IS NOT NULL
+		FROM task_outbox_events
+		WHERE workflow_run_id = $1
+	`, workflowRunID).Scan(&status, &lastError, &redisMessageID, &published)
+	if err != nil {
+		t.Fatalf("load task outbox event: %v", err)
+	}
+	if status != wantStatus || lastError != wantLastError || redisMessageID != wantRedisMessageID || published != wantPublished {
+		t.Fatalf(
+			"unexpected outbox state: status=%q last_error=%q redis_message_id=%q published=%v",
+			status,
+			lastError,
+			redisMessageID,
+			published,
+		)
 	}
 }
 

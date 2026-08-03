@@ -10,15 +10,18 @@ import (
 
 type repository interface {
 	QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) ([]workflow.TaskRun, error)
+	ClaimPendingTaskOutboxEvents(ctx context.Context) ([]workflow.TaskOutboxEvent, error)
+	MarkTaskOutboxEventPublished(ctx context.Context, input workflow.MarkTaskOutboxEventPublishedInput) error
+	RecordTaskOutboxEventFailure(ctx context.Context, input workflow.RecordTaskOutboxEventFailureInput) error
 }
 
 type Service struct {
-	repo      repository
-	publisher queue.TaskPublisher
+	repo             repository
+	outboxDispatcher *OutboxDispatcher
 }
 
 func NewService(repo repository, publisher queue.TaskPublisher) *Service {
-	return &Service{repo: repo, publisher: publisher}
+	return &Service{repo: repo, outboxDispatcher: NewOutboxDispatcher(repo, publisher)}
 }
 
 func (s *Service) QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) error {
@@ -34,15 +37,11 @@ func (s *Service) QueueRunnableTaskRuns(ctx context.Context, workflowRunID strin
 		return nil
 	}
 
-	for _, taskRun := range taskRuns {
-		if _, err := s.publisher.PublishTask(ctx, queue.TaskMessage{
-			WorkflowID:    taskRun.WorkflowID,
-			WorkflowRunID: taskRun.WorkflowRunID,
-			TaskID:        taskRun.TaskID,
-			TaskRunID:     taskRun.ID,
-		}); err != nil {
-			return err
-		}
+	if err := s.outboxDispatcher.DispatchPendingTaskOutboxEvents(ctx); err != nil {
+		slog.WarnContext(ctx, "task_outbox_dispatch_failed",
+			slog.String("workflow_run_id", workflowRunID),
+			slog.String("error", err.Error()),
+		)
 	}
 
 	return nil
