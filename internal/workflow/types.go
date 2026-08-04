@@ -1,5 +1,7 @@
 package workflow
 
+import "time"
+
 type CreateWorkflowInput struct {
 	Name         string
 	InputSchema  map[string]any
@@ -44,6 +46,8 @@ type CompleteTaskAttemptInput struct {
 	Success       bool
 	Output        map[string]any
 	FailureReason string
+	Retry         bool
+	NextRetryAt   time.Time
 }
 
 type CompleteTaskAttemptResult struct {

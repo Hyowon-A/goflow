@@ -72,15 +72,31 @@ func (r *PostgresRepository) CreateTaskAttempt(ctx context.Context, taskRunID st
 		}
 		return TaskAttempt{}, fmt.Errorf("load task run attempt count: %w", err)
 	}
-	if attemptCount > 0 {
+
+	var runningAttemptExists bool
+	err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM task_attempts
+			WHERE task_run_id = $1
+				AND status = $2
+		)
+	`, taskRunID, TaskAttemptStatusRunning).Scan(&runningAttemptExists)
+	if err != nil {
+		return TaskAttempt{}, fmt.Errorf("load running task attempt: %w", err)
+	}
+	if runningAttemptExists {
 		return TaskAttempt{}, ErrTaskAttemptAlreadyExists
 	}
+
+	attemptCount += 1
+
 	if _, err := tx.Exec(ctx, `
 		UPDATE task_runs
-		SET attempt_count = 1
+		SET attempt_count = $2
 		WHERE id = $1
-	`, taskRunID); err != nil {
-		return TaskAttempt{}, fmt.Errorf("reserve first task attempt: %w", err)
+	`, taskRunID, attemptCount); err != nil {
+		return TaskAttempt{}, fmt.Errorf("reserve task attempt: %w", err)
 	}
 
 	var taskAttempt TaskAttempt
@@ -88,7 +104,7 @@ func (r *PostgresRepository) CreateTaskAttempt(ctx context.Context, taskRunID st
 		INSERT INTO task_attempts (id, task_run_id, attempt_number, status)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, task_run_id, attempt_number, status
-	`, taskAttemptID, taskRunID, 1, TaskAttemptStatusRunning).Scan(
+	`, taskAttemptID, taskRunID, attemptCount, TaskAttemptStatusRunning).Scan(
 		&taskAttempt.ID,
 		&taskAttempt.TaskRunID,
 		&taskAttempt.AttemptNumber,
@@ -125,9 +141,16 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 	nextAttemptStatus := TaskAttemptStatusCompleted
 	nextTaskRunStatus := TaskRunStatusCompleted
 	failureReason := any(nil)
+	nextRetryAt := any(nil)
+	retryWait := false
 	if !input.Success {
 		nextAttemptStatus = TaskAttemptStatusFailed
 		nextTaskRunStatus = TaskRunStatusFailed
+		if input.Retry {
+			nextTaskRunStatus = TaskRunStatusRetryWait
+			nextRetryAt = input.NextRetryAt
+			retryWait = true
+		}
 		reason := strings.TrimSpace(input.FailureReason)
 		failureReason = reason
 	}
@@ -186,10 +209,11 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 		UPDATE task_runs
 		SET status = $2,
 			output = $3,
-			completed_at = now()
+			completed_at = CASE WHEN $4 THEN NULL ELSE now() END,
+			next_retry_at = $5
 		WHERE id = $1
 		RETURNING id, workflow_id, workflow_run_id, task_id, status
-	`, taskRunID, nextTaskRunStatus, input.Output).Scan(
+	`, taskRunID, nextTaskRunStatus, input.Output, retryWait, nextRetryAt).Scan(
 		&result.TaskRun.ID,
 		&result.TaskRun.WorkflowID,
 		&result.TaskRun.WorkflowRunID,

@@ -54,6 +54,41 @@ func TestPostgresRepositoryCreateTaskAttemptRejectsSecondAttemptUntilRetriesExis
 	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
 }
 
+func TestPostgresRepositoryCreateTaskAttemptCreatesNextRetryAttempt(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
+	repo := NewPostgresRepository(pool)
+
+	_, err := pool.Exec(context.Background(), `
+		UPDATE task_runs
+		SET attempt_count = 1
+		WHERE id = $1
+	`, fixture.taskRunID)
+	if err != nil {
+		t.Fatalf("seed retry attempt count: %v", err)
+	}
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO task_attempts (id, task_run_id, attempt_number, status, completed_at, failure_reason)
+		VALUES ($1, $2, $3, $4, now(), $5)
+	`, uuid.NewString(), fixture.taskRunID, 1, TaskAttemptStatusFailed, "temporary failure")
+	if err != nil {
+		t.Fatalf("seed failed first attempt: %v", err)
+	}
+
+	attempt, err := repo.CreateTaskAttempt(context.Background(), fixture.taskRunID)
+	if err != nil {
+		t.Fatalf("create retry task attempt: %v", err)
+	}
+
+	if attempt.AttemptNumber != 2 {
+		t.Fatalf("expected retry attempt number 2, got %d", attempt.AttemptNumber)
+	}
+	if attempt.Status != TaskAttemptStatusRunning {
+		t.Fatalf("expected retry attempt status running, got %q", attempt.Status)
+	}
+	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 2)
+}
+
 func TestPostgresRepositoryCreateTaskAttemptRejectsMissingTaskRun(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	repo := NewPostgresRepository(pool)
