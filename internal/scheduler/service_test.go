@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -149,14 +150,85 @@ func TestServiceQueueRunnableTaskRunsLogsAndIgnoresDispatchErrorsAfterQueueCommi
 	}
 }
 
+func TestServiceQueueDueRetryTaskRunsDispatchesOutboxEvents(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	repo := &fakeRepository{
+		retryTaskRuns: []workflow.TaskRun{
+			{ID: "task-run-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1"},
+		},
+		outboxEvents: []workflow.TaskOutboxEvent{
+			{ID: "event-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"},
+		},
+	}
+	publisher := &fakePublisher{}
+	service := NewService(repo, publisher)
+
+	err := service.QueueDueRetryTaskRuns(context.Background(), now)
+	if err != nil {
+		t.Fatalf("queue due retry task runs: %v", err)
+	}
+
+	if !reflect.DeepEqual(repo.retryTimes, []time.Time{now}) {
+		t.Fatalf("unexpected retry scheduler times: %#v", repo.retryTimes)
+	}
+	want := []queue.TaskMessage{
+		{WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"},
+	}
+	if !reflect.DeepEqual(publisher.messages, want) {
+		t.Fatalf("unexpected published messages: got %#v, want %#v", publisher.messages, want)
+	}
+	if len(repo.published) != 1 {
+		t.Fatalf("expected one outbox event marked published, got %#v", repo.published)
+	}
+}
+
+func TestServiceQueueDueRetryTaskRunsDispatchesNothingWhenNoRowsChanged(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	repo := &fakeRepository{}
+	publisher := &fakePublisher{}
+	service := NewService(repo, publisher)
+
+	err := service.QueueDueRetryTaskRuns(context.Background(), time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("queue due retry task runs: %v", err)
+	}
+	if len(publisher.messages) != 0 {
+		t.Fatalf("expected no published messages, got %#v", publisher.messages)
+	}
+	if repo.claims != 0 {
+		t.Fatalf("expected no outbox claim when no rows changed, got %d", repo.claims)
+	}
+	if !strings.Contains(logs.String(), `"reason":"no_due_retry_task_runs"`) {
+		t.Fatalf("expected no-op retry scheduler log, got %s", logs.String())
+	}
+}
+
+func TestServiceQueueDueRetryTaskRunsReturnsErrors(t *testing.T) {
+	wantErr := errors.New("repo failed")
+	service := NewService(&fakeRepository{retryErr: wantErr}, &fakePublisher{})
+
+	err := service.QueueDueRetryTaskRuns(context.Background(), time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
 type fakeRepository struct {
 	taskRuns       []workflow.TaskRun
+	retryTaskRuns  []workflow.TaskRun
 	batches        [][]workflow.TaskRun
+	retryBatches   [][]workflow.TaskRun
 	outboxEvents   []workflow.TaskOutboxEvent
 	outboxBatches  [][]workflow.TaskOutboxEvent
 	err            error
+	retryErr       error
 	claimErr       error
 	workflowRunIDs []string
+	retryTimes     []time.Time
 	claims         int
 	published      []workflow.MarkTaskOutboxEventPublishedInput
 	failures       []workflow.RecordTaskOutboxEventFailureInput
@@ -173,6 +245,19 @@ func (r *fakeRepository) QueueRunnableTaskRuns(_ context.Context, workflowRunID 
 		return taskRuns, nil
 	}
 	return r.taskRuns, nil
+}
+
+func (r *fakeRepository) QueueDueRetryTaskRuns(_ context.Context, now time.Time) ([]workflow.TaskRun, error) {
+	r.retryTimes = append(r.retryTimes, now)
+	if r.retryErr != nil {
+		return nil, r.retryErr
+	}
+	if len(r.retryBatches) > 0 {
+		taskRuns := r.retryBatches[0]
+		r.retryBatches = r.retryBatches[1:]
+		return taskRuns, nil
+	}
+	return r.retryTaskRuns, nil
 }
 
 func (r *fakeRepository) ClaimPendingTaskOutboxEvents(context.Context) ([]workflow.TaskOutboxEvent, error) {

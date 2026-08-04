@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -325,6 +326,65 @@ func (r *PostgresRepository) QueueRunnableTaskRuns(ctx context.Context, workflow
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit queue runnable task runs: %w", err)
+	}
+
+	return taskRuns, nil
+}
+
+func (r *PostgresRepository) QueueDueRetryTaskRuns(ctx context.Context, now time.Time) ([]TaskRun, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return []TaskRun{}, fmt.Errorf("begin queue due retry task run: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
+		UPDATE task_runs tr
+		SET status = $1
+		FROM tasks t
+		WHERE t.workflow_id = tr.workflow_id
+			AND t.id = tr.task_id
+			AND tr.status = $2
+			AND tr.next_retry_at <= $3
+			AND tr.attempt_count < COALESCE((t.config->'retry'->>'max_attempts')::int, 1)
+		RETURNING tr.id, tr.workflow_id, tr.workflow_run_id, tr.task_id, tr.status
+	`, TaskRunStatusQueued, TaskRunStatusRetryWait, now)
+	if err != nil {
+		return nil, fmt.Errorf("queue due retry task runs: %w", err)
+	}
+	defer rows.Close()
+
+	var taskRuns []TaskRun
+	for rows.Next() {
+		var taskRun TaskRun
+		if err := rows.Scan(
+			&taskRun.ID,
+			&taskRun.WorkflowID,
+			&taskRun.WorkflowRunID,
+			&taskRun.TaskID,
+			&taskRun.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan queued due retry task run: %w", err)
+		}
+		taskRuns = append(taskRuns, taskRun)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queued due retry task runs: %w", err)
+	}
+	rows.Close()
+
+	for _, tr := range taskRuns {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id)
+			VALUES ($1, $2, $3, $4, $5)
+		`, uuid.NewString(), tr.WorkflowID, tr.WorkflowRunID, tr.TaskID, tr.ID)
+		if err != nil {
+			return nil, fmt.Errorf("create retry task outbox event: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit queue due retry task runs: %w", err)
 	}
 
 	return taskRuns, nil
