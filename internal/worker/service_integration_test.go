@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -132,6 +133,180 @@ func TestExecutionServiceIntegrationFailsTaskAndAcknowledgesMessage(t *testing.T
 	}
 }
 
+func TestExecutionServiceIntegrationRunsQueuedRetryAsSecondAttempt(t *testing.T) {
+	pool := workerServiceTestPool(t)
+	fixture := seedWorkerServiceTaskRun(t, pool, ExecutorTypeLog, map[string]any{"message": "retry success"})
+	seedWorkerServiceFailedAttempt(t, pool, fixture.taskRunID)
+	repo := workflow.NewPostgresRepository(pool)
+	consumer := &fakeConsumer{
+		received: queue.ReceivedTaskMessage{
+			MessageID: "redis-message-id",
+			TaskMessage: queue.TaskMessage{
+				WorkflowID:    fixture.workflowID,
+				WorkflowRunID: fixture.workflowRunID,
+				TaskID:        fixture.taskID,
+				TaskRunID:     fixture.taskRunID,
+			},
+		},
+	}
+	service := NewService(
+		ServiceConfig{WorkerID: "worker-1"},
+		consumer,
+		repo,
+		repo,
+		NewExecutorRegistry(map[string]Executor{
+			ExecutorTypeLog: NewLogExecutor(nil),
+		}),
+	)
+
+	if err := service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process retry task: %v", err)
+	}
+
+	if !reflect.DeepEqual(consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acknowledged after retry persistence, got %#v", consumer.acks)
+	}
+
+	state := loadWorkerServiceTaskRunState(t, pool, fixture.taskRunID)
+	if state.taskRunStatus != workflow.TaskRunStatusCompleted {
+		t.Fatalf("expected task run completed, got %q", state.taskRunStatus)
+	}
+	if state.attemptCount != 2 {
+		t.Fatalf("expected attempt_count 2, got %d", state.attemptCount)
+	}
+	attempts := loadWorkerServiceTaskAttempts(t, pool, fixture.taskRunID)
+	want := []workerServiceAttemptState{
+		{number: 1, status: workflow.TaskAttemptStatusFailed},
+		{number: 2, status: workflow.TaskAttemptStatusCompleted},
+	}
+	if !reflect.DeepEqual(attempts, want) {
+		t.Fatalf("unexpected retry attempts: got %#v, want %#v", attempts, want)
+	}
+	if state.output["status"] != "completed" || state.output["message"] != "retry success" {
+		t.Fatalf("unexpected task run output: %#v", state.output)
+	}
+}
+
+func TestExecutionServiceIntegrationExhaustedRetryStopsFailed(t *testing.T) {
+	pool := workerServiceTestPool(t)
+	fixture := seedWorkerServiceTaskRun(t, pool, ExecutorTypeRandomFail, map[string]any{
+		"failure_probability": float64(1),
+		"retry":               map[string]any{"max_attempts": 2},
+	})
+	seedWorkerServiceFailedAttempt(t, pool, fixture.taskRunID)
+	repo := workflow.NewPostgresRepository(pool)
+	consumer := &fakeConsumer{
+		received: workerServiceMessage(fixture, "redis-message-id"),
+	}
+	service := NewService(
+		ServiceConfig{WorkerID: "worker-1"},
+		consumer,
+		repo,
+		repo,
+		NewExecutorRegistry(map[string]Executor{
+			ExecutorTypeRandomFail: NewRandomFailExecutor(nil),
+		}),
+	)
+
+	if err := service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process exhausted retry task: %v", err)
+	}
+
+	if !reflect.DeepEqual(consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acknowledged, got %#v", consumer.acks)
+	}
+	state := loadWorkerServiceTaskRunState(t, pool, fixture.taskRunID)
+	if state.taskRunStatus != workflow.TaskRunStatusFailed {
+		t.Fatalf("expected exhausted retry task run failed, got %q", state.taskRunStatus)
+	}
+	if state.attemptCount != 2 {
+		t.Fatalf("expected attempt_count 2, got %d", state.attemptCount)
+	}
+	want := []workerServiceAttemptState{
+		{number: 1, status: workflow.TaskAttemptStatusFailed},
+		{number: 2, status: workflow.TaskAttemptStatusFailed},
+	}
+	if attempts := loadWorkerServiceTaskAttempts(t, pool, fixture.taskRunID); !reflect.DeepEqual(attempts, want) {
+		t.Fatalf("unexpected exhausted retry attempts: got %#v, want %#v", attempts, want)
+	}
+}
+
+func TestExecutionServiceIntegrationUnknownExecutorFailureIsPermanentEvenWithRetryPolicy(t *testing.T) {
+	pool := workerServiceTestPool(t)
+	fixture := seedWorkerServiceTaskRun(t, pool, "unknown", map[string]any{
+		"retry": map[string]any{"max_attempts": 3},
+	})
+	repo := workflow.NewPostgresRepository(pool)
+	consumer := &fakeConsumer{
+		received: workerServiceMessage(fixture, "redis-message-id"),
+	}
+	service := NewService(
+		ServiceConfig{WorkerID: "worker-1"},
+		consumer,
+		repo,
+		repo,
+		NewExecutorRegistry(nil),
+	)
+
+	if err := service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process unknown executor task: %v", err)
+	}
+
+	state := loadWorkerServiceTaskRunState(t, pool, fixture.taskRunID)
+	if state.taskRunStatus != workflow.TaskRunStatusFailed {
+		t.Fatalf("expected unknown executor task run failed, got %q", state.taskRunStatus)
+	}
+	if state.failureReason == nil || *state.failureReason != ErrUnknownExecutorType.Error() {
+		t.Fatalf("expected unknown executor failure reason, got %#v", state.failureReason)
+	}
+	if !reflect.DeepEqual(consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acknowledged, got %#v", consumer.acks)
+	}
+}
+
+func TestExecutionServiceIntegrationInvalidRetryPolicyFailsWithoutRetryLoop(t *testing.T) {
+	pool := workerServiceTestPool(t)
+	fixture := seedWorkerServiceTaskRun(t, pool, ExecutorTypeRandomFail, map[string]any{
+		"failure_probability": float64(1),
+		"retry":               map[string]any{"multiplier": 0.5},
+	})
+	repo := workflow.NewPostgresRepository(pool)
+	consumer := &fakeConsumer{
+		received: workerServiceMessage(fixture, "redis-message-id"),
+	}
+	service := NewService(
+		ServiceConfig{WorkerID: "worker-1"},
+		consumer,
+		repo,
+		repo,
+		NewExecutorRegistry(map[string]Executor{
+			ExecutorTypeRandomFail: NewRandomFailExecutor(nil),
+		}),
+	)
+
+	if err := service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process invalid retry policy task: %v", err)
+	}
+
+	state := loadWorkerServiceTaskRunState(t, pool, fixture.taskRunID)
+	if state.taskRunStatus != workflow.TaskRunStatusFailed {
+		t.Fatalf("expected invalid retry policy task run failed, got %q", state.taskRunStatus)
+	}
+	if state.attemptCount != 1 {
+		t.Fatalf("expected invalid retry policy to stop after one attempt, got %d", state.attemptCount)
+	}
+	if state.failureReason == nil || !strings.Contains(*state.failureReason, workflow.ErrValidation.Error()) {
+		got := "<nil>"
+		if state.failureReason != nil {
+			got = *state.failureReason
+		}
+		t.Fatalf("expected validation failure reason, got %q", got)
+	}
+	if !reflect.DeepEqual(consumer.acks, []string{"redis-message-id"}) {
+		t.Fatalf("expected redis-message-id to be acknowledged, got %#v", consumer.acks)
+	}
+}
+
 func workerServiceTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -256,6 +431,39 @@ func seedWorkerServiceTaskRun(
 	return fixture
 }
 
+func workerServiceMessage(fixture workerServiceTaskRunFixture, messageID string) queue.ReceivedTaskMessage {
+	return queue.ReceivedTaskMessage{
+		MessageID: messageID,
+		TaskMessage: queue.TaskMessage{
+			WorkflowID:    fixture.workflowID,
+			WorkflowRunID: fixture.workflowRunID,
+			TaskID:        fixture.taskID,
+			TaskRunID:     fixture.taskRunID,
+		},
+	}
+}
+
+func seedWorkerServiceFailedAttempt(t *testing.T, pool *pgxpool.Pool, taskRunID string) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `
+		UPDATE task_runs
+		SET attempt_count = 1
+		WHERE id = $1
+	`, taskRunID)
+	if err != nil {
+		t.Fatalf("seed retry attempt count: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO task_attempts (id, task_run_id, attempt_number, status, completed_at, failure_reason)
+		VALUES ($1, $2, $3, $4, now(), $5)
+	`, uuid.NewString(), taskRunID, 1, workflow.TaskAttemptStatusFailed, "temporary failure")
+	if err != nil {
+		t.Fatalf("seed failed first attempt: %v", err)
+	}
+}
+
 type workerServiceTaskRunState struct {
 	taskRunStatus      workflow.TaskRunStatus
 	attemptCount       int
@@ -297,4 +505,37 @@ func loadWorkerServiceTaskRunState(t *testing.T, pool *pgxpool.Pool, taskRunID s
 	}
 
 	return state
+}
+
+type workerServiceAttemptState struct {
+	number uint
+	status workflow.TaskAttemptStatus
+}
+
+func loadWorkerServiceTaskAttempts(t *testing.T, pool *pgxpool.Pool, taskRunID string) []workerServiceAttemptState {
+	t.Helper()
+
+	rows, err := pool.Query(context.Background(), `
+		SELECT attempt_number, status
+		FROM task_attempts
+		WHERE task_run_id = $1
+		ORDER BY attempt_number
+	`, taskRunID)
+	if err != nil {
+		t.Fatalf("query worker service task attempts: %v", err)
+	}
+	defer rows.Close()
+
+	var attempts []workerServiceAttemptState
+	for rows.Next() {
+		var attempt workerServiceAttemptState
+		if err := rows.Scan(&attempt.number, &attempt.status); err != nil {
+			t.Fatalf("scan worker service task attempt: %v", err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate worker service task attempts: %v", err)
+	}
+	return attempts
 }

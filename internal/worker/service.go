@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -98,6 +99,14 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		return err
 	}
 
+	policy, err := workflow.ParseRetryPolicy(taskRunExecution.Config)
+	if err != nil {
+		if completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
+			return completeErr
+		}
+		return s.consumer.AckTask(ctx, message.MessageID)
+	}
+
 	executionInput := ExecutionInput{
 		WorkflowID:    taskRunExecution.WorkflowID,
 		WorkflowRunID: taskRunExecution.WorkflowRunID,
@@ -121,6 +130,7 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 	}
 
 	result, executeErr := executor.Execute(ctx, executionInput)
+
 	completeInput, err := completeAttemptInput(taskAttempt.ID, message.TaskRunID, result, executeErr)
 	if err != nil {
 		if completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
@@ -128,6 +138,9 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		}
 		return s.consumer.AckTask(ctx, message.MessageID)
 	}
+	decision := workflow.DecideRetry(time.Now(), taskAttempt.AttemptNumber, policy, result.Retryable, completeInput.FailureReason)
+	completeInput.Retry = decision.Retry
+	completeInput.NextRetryAt = decision.NextRetryAt
 
 	if _, err := s.repo.CompleteTaskAttempt(ctx, completeInput); err != nil {
 		return err
