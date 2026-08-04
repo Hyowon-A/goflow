@@ -271,9 +271,11 @@ current worker flow processes one message at a time:
    `running`.
 4. Load the task definition, executor type, task config and task-run input.
 5. Create a running `task_attempt`.
-6. Resolve and run the configured executor.
-7. Complete the task attempt and task run as `completed` or `failed`.
-8. Acknowledge the Redis message only after completion is persisted.
+6. Validate task retry policy.
+7. Resolve and run the configured executor.
+8. Complete the task attempt and task run as `completed`, `failed` or
+   `retry_wait`.
+9. Acknowledge the Redis message only after completion is persisted.
 
 ```mermaid
 flowchart TD
@@ -284,11 +286,23 @@ flowchart TD
     Work --> Execute[Executor.Execute]
     Execute --> Complete[CompleteTaskAttempt]
     Complete --> Ack[XACK message_id]
+    Complete -->|retryable failure| RetryWait[retry_wait until next_retry_at]
     Ack --> Removed[Redis pending entry removed]
     Claim -->|fails| Status[Load current task-run status]
     Status -->|running/completed/failed/dead_letter| AckDuplicate[XACK duplicate]
     Status -->|missing/error/pending/retry_wait| NoAck[No XACK]
 ```
+
+Retry policy lives on task config under `retry`. Supported fields are
+`max_attempts`, `initial_delay` and `multiplier`; delays use Go duration
+strings. Missing policy defaults to one attempt. Invalid retry policy completes
+the current attempt as failed before executor execution so a bad config cannot
+loop forever.
+
+Retry decisions use the current attempt number, parsed policy and executor
+retryability. Unknown executor types and non-retryable executor failures are
+permanent failures. Retryable failures with attempts remaining move the task run
+to `retry_wait` and set `next_retry_at`; exhausted attempts move to `failed`.
 
 If the claim fails, the worker checks PostgreSQL before acknowledging. Messages
 for task runs already `running`, `completed`, `failed` or `dead_letter` are
@@ -307,22 +321,25 @@ Built-in executors are intentionally small:
 | `log` | Logs a message from task config or task-run input and returns it as output. |
 | `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
 
-Redis pending-message recovery, leases, retries and dead-letter handling remain
-future work.
+Redis pending-message recovery, leases and dead-letter handling remain future
+work.
 
 ## DAG Scheduling
 
 The scheduler is a small coordinator between PostgreSQL workflow state and the
 task outbox. It asks the workflow repository to move runnable task runs from
-`pending` to `queued` and write matching outbox rows in the same transaction.
-The dispatcher publishes pending outbox rows to Redis and marks them
-`published` only after `XADD` succeeds.
+`pending` to `queued`, or due retry task runs from `retry_wait` to `queued`,
+and write matching outbox rows in the same transaction. The dispatcher
+publishes pending outbox rows to Redis and marks them `published` only after
+`XADD` succeeds.
 
 ```mermaid
 flowchart TD
     Trigger[Workflow run created or task completed] --> Tx[PostgreSQL transaction]
     Tx --> Queue[Queue runnable task_runs]
+    Tx --> DueRetry[Queue due retry_wait task_runs]
     Queue --> Outbox[Insert task_outbox_events]
+    DueRetry --> Outbox
     Outbox --> Commit[Commit]
     Commit --> Dispatch[Outbox dispatcher claims pending rows]
     Dispatch --> Publish[Publish Redis task message]
@@ -338,8 +355,16 @@ task runs are ignored by the conditional update.
 Scheduler passes that find no runnable task runs emit `scheduler_noop` with the
 workflow run ID and reason.
 
+Due-retry scheduling uses a separate repository method because retry readiness
+depends on `status = retry_wait`, `next_retry_at <= now` and attempts remaining.
+Future retry times, exhausted attempts and terminal task runs are ignored.
+Retry queueing emits `retry_task_run_queued` and uses the same durable outbox
+dispatch path as DAG scheduling.
+
 The API triggers root scheduling after workflow-run creation commits. Worker
 completion can call the same scheduler path to release newly ready successors.
-Synchronous dispatch is an optimization. The recovery boundary is the durable
-outbox row, so a later dispatcher pass can publish rows left behind by a crash
-or Redis outage.
+The scheduler service exposes due-retry queueing, but the worker command
+currently only dispatches existing outbox rows; it does not run a due-retry scan
+itself. Synchronous dispatch is an optimization. The recovery boundary is the
+durable outbox row, so a later dispatcher pass can publish rows left behind by a
+crash or Redis outage.

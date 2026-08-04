@@ -177,6 +177,38 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./internal/worker ./internal/queue ./internal/scheduler`
 - Ran `go test ./...`
 
+## Day 12
+
+### AI-assisted work
+
+- Added task retry policy parsing for `max_attempts`, `initial_delay` and `multiplier`
+- Added deterministic retry decision logic using attempt number, retryability and retry policy
+- Extended attempt completion so retryable failures move task runs to `retry_wait` with `next_retry_at`
+- Added due-retry queueing through the same transactional task outbox path used by DAG scheduling
+- Added scheduler service support for dispatching due retry outbox events
+- Updated worker execution so retry policy is validated before executor execution and retried queue messages create later attempt numbers
+- Added tests for retry policy validation, retry decisions, retry-wait persistence, due retry queueing, second-attempt execution, exhausted retries and invalid retry configs
+
+### Accepted suggestions
+
+- Kept retry policy in task config instead of adding a retry-policy table
+- Reused Go duration strings and the existing `task_runs.next_retry_at` column
+- Reused the task outbox for retry queue messages instead of adding a retry queue
+- Kept jitter out until synchronized retry load becomes a measured problem
+- Treated unknown executor types and non-retryable executor failures as permanent failures
+
+### Rejected suggestions
+
+- Rejected leases, dead-letter inspection APIs and metrics during Day 12
+- Rejected a separate retry scheduler binary while the scheduler service boundary is enough
+- Rejected custom backoff abstractions beyond the current small policy parser and decider
+
+### Validation performed
+
+- Ran `go test ./internal/workflow -count=1`
+- Ran `go test ./internal/worker -count=1`
+- Ran `go test ./internal/scheduler -count=1`
+
 ## Day 3
 
 ### AI-assisted work

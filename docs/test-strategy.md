@@ -4,7 +4,7 @@
 
 GoFlow tests should prove durable workflow behavior against the same boundaries
 the production system uses: HTTP handlers, service logic, PostgreSQL constraints
-and later Redis-backed worker execution.
+and Redis-backed worker execution.
 
 ## Current Test Layers
 
@@ -60,16 +60,18 @@ PostgreSQL completion first, successor scheduling second, Redis ack last.
 Worker executor tests cover the built-in `sleep`, `log` and `random_fail`
 executors. Worker service integration tests use PostgreSQL with fake queue
 messages to verify successful and failed execution paths end in durable task
-state.
+state, including retry attempt creation, exhausted retries, permanent unknown
+executor failures and invalid retry policy failures.
 
 Scheduler tests use fake publishers for publish coordination and PostgreSQL
 integration tests for runnable-task selection. A worker/scheduler integration
 test runs an `A -> B, C -> D` workflow with real PostgreSQL and an in-memory
 queue to prove fan-out and fan-in progress without requiring Redis. Scheduler
-tests also verify no-op scheduling logs when no task runs changed state. Outbox
-tests cover transactional outbox row creation, concurrent claiming, publish
-failure retry visibility, and crash-before-publish recovery with a fake
-publisher.
+tests also verify no-op scheduling logs when no task runs changed state and
+that due retry scheduling dispatches through the same outbox path when the
+scheduler service is invoked. Outbox tests cover transactional outbox row
+creation, concurrent claiming, publish failure retry visibility, and
+crash-before-publish recovery with a fake publisher.
 
 ## Current Coverage
 
@@ -107,6 +109,11 @@ publisher.
 - Conditional task-run claiming from `queued` to `running`
 - Task-run execution loading
 - Task-attempt creation and completion
+- Retry policy parsing and retry decision logic
+- Retry-wait persistence with `next_retry_at`
+- Due retry queueing through transactional outbox rows
+- Retry execution as attempt 2 and later
+- Exhausted, non-retryable and invalid-policy retry failure cases
 - Built-in worker executors
 - Worker receive, claim, execute, complete and acknowledgement coordination
 - Duplicate queue-message acknowledgement and logging
@@ -152,6 +159,12 @@ Run the worker service tests:
 
 ```sh
 go test ./internal/worker -v
+```
+
+Run the retry-focused packages:
+
+```sh
+go test ./internal/workflow ./internal/worker ./internal/scheduler -v
 ```
 
 Some integration tests require local PostgreSQL. Start it with:

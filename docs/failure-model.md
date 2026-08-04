@@ -74,10 +74,24 @@ does not create `task_attempts`; workers create attempts only when they actually
 run tasks.
 
 During worker execution, GoFlow creates a running `task_attempt` after a task
-run is claimed. Successful executor output completes both the attempt and task
-run. Executor errors, unknown executor types and explicit executor failure
-reasons complete both records as failed. Redis acknowledgement happens only
-after the completion update succeeds.
+run is claimed. It parses task retry policy before executor execution. Invalid
+retry policy completes the attempt as failed and acknowledges the Redis message
+so the task does not loop forever.
+
+Supported retry policy fields live under task `config.retry`:
+
+- `max_attempts`
+- `initial_delay`
+- `multiplier`
+
+Missing policy defaults to one attempt. Delays use Go duration strings. Jitter
+is intentionally not implemented.
+
+Successful executor output completes both the attempt and task run. Unknown
+executor types and non-retryable executor failures complete the attempt and
+task run as failed. Retryable failures with attempts remaining complete the
+attempt as failed, move the task run to `retry_wait` and store `next_retry_at`.
+Exhausted retry attempts end as permanent task-run failures.
 
 The task outbox only protects scheduler-to-Redis delivery. It records queued
 task messages in the same PostgreSQL transaction as the task-run state change,
@@ -98,9 +112,14 @@ sequenceDiagram
     Dispatcher->>Redis: XADD task message
     Dispatcher->>Postgres: mark outbox row published
     Worker->>Redis: XREADGROUP task message
-    Worker->>Postgres: persist task completion
+    Worker->>Postgres: persist task completion, failure or retry_wait
+    Scheduler->>Postgres: move due retry_wait task_run to queued and insert outbox row
     Worker->>Redis: XACK only after completion persists
 ```
+
+The scheduler service supports the due-retry queueing step above. The current
+worker command only dispatches existing outbox rows and does not periodically
+invoke that due-retry scan itself.
 
 Duplicate queue messages are handled at the PostgreSQL claim boundary. If a
 task run is already `running`, `completed`, `failed` or `dead_letter`, the
@@ -109,14 +128,9 @@ attempt. Unknown task runs, ambiguous lookup failures and non-ready states stay
 pending. Duplicate acknowledgements are logged with workflow, task, Redis
 message, worker and reason fields.
 
-## Planned Worker Failure Handling
+## Remaining Worker Failure Handling
 
-Later phases will add worker leases, retries and dead-letter handling. The
-planned model is:
-
-- Workers process tasks with at-least-once delivery semantics.
-- Task execution must be idempotent or guarded against duplicate side effects.
-- Workers heartbeat while holding task leases.
-- Expired leases allow another worker to recover unfinished work.
-- Retry policy records each attempt and eventually moves exhausted work to a
-  dead-letter state.
+Workers process tasks with at-least-once delivery semantics. Task execution
+must be idempotent or guarded against duplicate side effects. Worker leases,
+heartbeats, expired-lease recovery and dead-letter inspection remain future
+work.

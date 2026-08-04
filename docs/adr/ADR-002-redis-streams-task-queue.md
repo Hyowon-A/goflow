@@ -45,8 +45,10 @@ type TaskConsumer interface {
 }
 ```
 
-The Redis consumer uses consumer groups with `XREADGROUP` and acknowledges with
-`XACK` only after PostgreSQL task-run claiming succeeds.
+The Redis consumer uses consumer groups with `XREADGROUP`. Day 7 acknowledged
+with `XACK` after PostgreSQL task-run claiming succeeded; the current worker
+acknowledges only after task completion or duplicate-message handling has been
+persisted.
 
 Task messages will include:
 

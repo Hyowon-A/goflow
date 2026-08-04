@@ -18,6 +18,8 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Task definition and dependency API endpoints
 - Workflow run creation with transactional task-run initialization
 - DAG scheduler queueing for root tasks and ready successors
+- Retry policy parsing and retry-wait persistence
+- Due-retry queueing support through the scheduler service
 - Transactional task outbox publishing and recovery
 - Worker task-run claiming from `queued` to `running`
 - Worker task execution with task-attempt creation and completion
@@ -47,10 +49,12 @@ PostgreSQL is the source of truth for workflow and task state.
 
 Redis Streams is the task-delivery boundary. The current implementation can
 publish task messages to a configured stream, consume them with Redis consumer
-groups, queue runnable task runs and matching outbox rows transactionally,
+groups, queue runnable task runs with matching outbox rows transactionally,
 recover unpublished outbox rows, claim queued task runs in PostgreSQL, execute
 the task, persist a task attempt, and acknowledge Redis messages only after
-completion is persisted.
+completion is persisted. The scheduler service can also queue due retry task
+runs with matching outbox rows; the worker command currently dispatches existing
+outbox rows but does not run a due-retry scan itself.
 
 ```mermaid
 flowchart TD
@@ -62,6 +66,7 @@ flowchart TD
     Attempt --> Execute[Execute task]
     Execute --> Complete[Persist task_attempt and task_run outcome]
     Complete -->|success| Ack[Redis XACK]
+    Complete -->|retryable failure| RetryWait[retry_wait until next_retry_at]
     Ack --> Removed[Message removed from pending]
     Complete -->|persistence error| Pending[Message remains pending]
 ```
@@ -80,6 +85,23 @@ runtime execution state.
 timestamps. `task_attempts` stores individual retry attempts so failures are not
 overwritten by later retries. `task_outbox_events` stores durable Redis publish
 work for queued task runs.
+
+Task retry policy is read from task `config.retry`:
+
+```json
+{
+  "retry": {
+    "max_attempts": 3,
+    "initial_delay": "1s",
+    "multiplier": 2
+  }
+}
+```
+
+All fields are optional. Missing retry policy means one attempt. Delays use Go
+duration strings. Invalid retry config fails the current attempt before executor
+execution so invalid tasks do not loop. A retry policy only permits retries; the
+executor result must also mark the failure as retryable.
 
 The schema uses named primary keys, unique constraints, check constraints and
 composite foreign keys to prevent invalid cross-workflow dependencies and
@@ -148,6 +170,8 @@ internal/
   database/
   httpserver/
   queue/
+  scheduler/
+  worker/
   workflow/
 
 docs/
@@ -206,7 +230,8 @@ values can be provided through `.env`.
 | `QUEUE_READ_COUNT` | No | `1` | Maximum messages read per worker Redis read. |
 
 The provided `.env.example` points at the local Docker Compose PostgreSQL
-instance on port `5433` and Redis on port `6379`.
+instance on port `5433` and Redis on port `6379`. It also sets `HTTP_PORT=8081`,
+which overrides the code default during local development.
 
 ## API Endpoints
 
@@ -218,6 +243,27 @@ instance on port `5433` and Redis on port `6379`.
 | `POST` | `/workflows/{workflowID}/tasks` | Creates a task definition inside a workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Creates a dependency between two tasks in a workflow. |
 | `POST` | `/workflows/{workflowID}/runs` | Creates a workflow run and one pending task run per task. |
+
+Example local workflow run:
+
+```sh
+API=http://localhost:8081
+
+curl -sS -X POST "$API/workflows" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo"}'
+
+WORKFLOW_ID=<id from workflow response>
+
+curl -sS -X POST "$API/workflows/$WORKFLOW_ID/tasks" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"hello","executor_type":"log","config":{"message":"hello from GoFlow"}}'
+
+curl -sS -X POST "$API/workflows/$WORKFLOW_ID/runs" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-run-1' \
+  -d '{"input":{"source":"readme"}}'
+```
 
 API errors use a consistent JSON shape:
 
@@ -243,7 +289,6 @@ missing. Request logs include method, path, status, duration and request ID.
 ## Planned Features
 
 - Broader idempotency cleanup and retention policy
-- Retry with exponential backoff
 - Dead-letter handling
 - Worker heartbeat and lease recovery
 - Prometheus metrics
