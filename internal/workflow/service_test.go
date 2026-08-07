@@ -37,6 +37,18 @@ func (r *fakeRepository) CreateWorkflowRun(context.Context, string, CreateWorkfl
 	return WorkflowRun{}, ErrNotImplemented
 }
 
+func (r *fakeRepository) GetWorkflowRun(context.Context, string, string) (WorkflowRun, error) {
+	return WorkflowRun{}, ErrNotImplemented
+}
+
+func (r *fakeRepository) ListTaskRuns(context.Context, string, string) ([]TaskRun, error) {
+	return nil, ErrNotImplemented
+}
+
+func (r *fakeRepository) ListTaskAttempts(context.Context, string, string, string) ([]TaskAttempt, error) {
+	return nil, ErrNotImplemented
+}
+
 func TestServiceCreateDependencyPreservesDependencyCycleError(t *testing.T) {
 	repo := &fakeRepository{
 		createDepErr: ErrDependencyCycle,

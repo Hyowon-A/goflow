@@ -64,6 +64,22 @@ type workflowRunResponse struct {
 	Input      map[string]any `json:"input,omitempty"`
 }
 
+type taskRunResponse struct {
+	ID            string `json:"id"`
+	WorkflowID    string `json:"workflow_id"`
+	WorkflowRunID string `json:"workflow_run_id"`
+	TaskID        string `json:"task_id"`
+	Status        string `json:"status"`
+}
+
+type taskAttemptResponse struct {
+	ID            string `json:"id"`
+	TaskRunID     string `json:"task_run_id"`
+	AttemptNumber uint   `json:"attempt_number"`
+	Status        string `json:"status"`
+	FailureReason string `json:"failure_reason,omitempty"`
+}
+
 type notImplementedWorkflowService struct{}
 
 func (notImplementedWorkflowService) CreateWorkflow(context.Context, workflow.CreateWorkflowInput) (workflow.Workflow, error) {
@@ -80,6 +96,18 @@ func (notImplementedWorkflowService) CreateDependency(context.Context, string, w
 
 func (notImplementedWorkflowService) CreateWorkflowRun(context.Context, string, workflow.CreateWorkflowRunInput) (workflow.WorkflowRun, error) {
 	return workflow.WorkflowRun{}, workflow.ErrNotImplemented
+}
+
+func (notImplementedWorkflowService) GetWorkflowRun(context.Context, string, string) (workflow.WorkflowRun, error) {
+	return workflow.WorkflowRun{}, workflow.ErrNotImplemented
+}
+
+func (notImplementedWorkflowService) ListTaskRuns(context.Context, string, string) ([]workflow.TaskRun, error) {
+	return nil, workflow.ErrNotImplemented
+}
+
+func (notImplementedWorkflowService) ListTaskAttempts(context.Context, string, string, string) ([]workflow.TaskAttempt, error) {
+	return nil, workflow.ErrNotImplemented
 }
 
 func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -250,10 +278,100 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) getWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	id := requestIDForRequest(r)
+
+	workflowID, workflowRunID, ok := workflowRunPathParams(w, r, id)
+	if !ok {
+		return
+	}
+
+	workflowRun, err := s.workflows.GetWorkflowRun(r.Context(), workflowID, workflowRunID)
+	if err != nil {
+		writeWorkflowError(w, id, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, workflowRunResponse{
+		ID:         workflowRun.ID,
+		WorkflowID: workflowRun.WorkflowID,
+		Status:     workflowRun.Status,
+		Input:      workflowRun.Input,
+	})
+}
+
+func (s *Server) listTaskRuns(w http.ResponseWriter, r *http.Request) {
+	id := requestIDForRequest(r)
+
+	workflowID, workflowRunID, ok := workflowRunPathParams(w, r, id)
+	if !ok {
+		return
+	}
+
+	taskRuns, err := s.workflows.ListTaskRuns(r.Context(), workflowID, workflowRunID)
+	if err != nil {
+		writeWorkflowError(w, id, err)
+		return
+	}
+
+	responses := make([]taskRunResponse, 0, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		responses = append(responses, taskRunResponse{
+			ID:            taskRun.ID,
+			WorkflowID:    taskRun.WorkflowID,
+			WorkflowRunID: taskRun.WorkflowRunID,
+			TaskID:        taskRun.TaskID,
+			Status:        string(taskRun.Status),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"task_runs": responses})
+}
+
+func (s *Server) listTaskAttempts(w http.ResponseWriter, r *http.Request) {
+	id := requestIDForRequest(r)
+
+	workflowID, workflowRunID, ok := workflowRunPathParams(w, r, id)
+	if !ok {
+		return
+	}
+
+	taskRunID := chi.URLParam(r, "taskRunID")
+	if !isUUID(taskRunID) {
+		writeError(w, http.StatusBadRequest, "invalid_uuid", "taskRunID must be a valid UUID", id)
+		return
+	}
+
+	attempts, err := s.workflows.ListTaskAttempts(r.Context(), workflowID, workflowRunID, taskRunID)
+	if err != nil {
+		writeWorkflowError(w, id, err)
+		return
+	}
+
+	responses := make([]taskAttemptResponse, 0, len(attempts))
+	for _, attempt := range attempts {
+		responses = append(responses, taskAttemptResponse{
+			ID:            attempt.ID,
+			TaskRunID:     attempt.TaskRunID,
+			AttemptNumber: attempt.AttemptNumber,
+			Status:        string(attempt.Status),
+			FailureReason: attempt.FailureReason,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"task_attempts": responses})
+}
+
 func writeWorkflowError(w http.ResponseWriter, requestID string, err error) {
 	switch {
 	case errors.Is(err, workflow.ErrWorkflowNotFound):
 		writeError(w, http.StatusNotFound, "workflow_not_found", "workflow was not found", requestID)
+	case errors.Is(err, workflow.ErrWorkflowRunNotFound):
+		writeError(w, http.StatusNotFound, "workflow_run_not_found", "workflow run was not found", requestID)
+	case errors.Is(err, workflow.ErrTaskRunNotFound):
+		writeError(w, http.StatusNotFound, "task_run_not_found", "task run was not found", requestID)
+	case errors.Is(err, workflow.ErrTaskAttemptNotFound):
+		writeError(w, http.StatusNotFound, "task_attempt_not_found", "task attempt was not found", requestID)
 	case errors.Is(err, workflow.ErrInvalidTaskReference):
 		writeError(w, http.StatusBadRequest, "invalid_task_reference", "dependency references a task outside the workflow or a missing task", requestID)
 	case errors.Is(err, workflow.ErrDuplicateTaskName):
@@ -285,6 +403,21 @@ func workflowIDPathParam(w http.ResponseWriter, r *http.Request, requestID strin
 	}
 
 	return workflowID, true
+}
+
+func workflowRunPathParams(w http.ResponseWriter, r *http.Request, requestID string) (string, string, bool) {
+	workflowID, ok := workflowIDPathParam(w, r, requestID)
+	if !ok {
+		return "", "", false
+	}
+
+	workflowRunID := chi.URLParam(r, "workflowRunID")
+	if !isUUID(workflowRunID) {
+		writeError(w, http.StatusBadRequest, "invalid_uuid", "workflowRunID must be a valid UUID", requestID)
+		return "", "", false
+	}
+
+	return workflowID, workflowRunID, true
 }
 
 func isUUID(value string) bool {

@@ -280,6 +280,19 @@ func postRaw(t *testing.T, handler http.Handler, path string, body string, reque
 	return response
 }
 
+func getJSON(t *testing.T, handler http.Handler, path, requestID string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	if requestID != "" {
+		request.Header.Set("X-Request-ID", requestID)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
 func decodeJSONBody(t *testing.T, response *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 
@@ -737,6 +750,99 @@ func TestWorkflowRunAPIContract(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunInspectionAPI(t *testing.T) {
+	pool, handler := workflowAPIHandler(t)
+	repo := workflow.NewPostgresRepository(pool)
+
+	t.Run("completed workflow run", func(t *testing.T) {
+		workflowName := uniqueWorkflowName("day13-run-read-completed")
+		cleanupWorkflowByName(t, pool, workflowName)
+
+		workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+		taskID := createTaskThroughAPI(t, handler, workflowID, "extract")
+		workflowRunID := createWorkflowRunThroughAPI(t, handler, workflowID, map[string]any{"document_id": "doc-complete"})
+		taskRunID := apiTaskRunIDByTask(t, pool, workflowRunID, taskID)
+		setAPITaskRunStatus(t, pool, taskRunID, workflow.TaskRunStatusRunning)
+		attempt, err := repo.CreateTaskAttempt(context.Background(), taskRunID)
+		if err != nil {
+			t.Fatalf("create task attempt: %v", err)
+		}
+		if _, err := repo.CompleteTaskAttempt(context.Background(), workflow.CompleteTaskAttemptInput{
+			TaskAttemptID: attempt.ID,
+			TaskRunID:     taskRunID,
+			Success:       true,
+			Output:        map[string]any{"ok": true},
+		}); err != nil {
+			t.Fatalf("complete task attempt: %v", err)
+		}
+		if _, changed, err := repo.FinalizeWorkflowRun(context.Background(), workflowRunID); err != nil || !changed {
+			t.Fatalf("finalize workflow run: changed=%t err=%v", changed, err)
+		}
+
+		response := getJSON(t, handler, "/workflows/"+workflowID+"/runs/"+workflowRunID, "read-completed-run")
+		expectStatus(t, response, http.StatusOK)
+		expectJSONResponse(t, response)
+		expectRequestIDHeader(t, response, "read-completed-run")
+		body := decodeJSONBody(t, response)
+		expectFieldEquals(t, body, "id", workflowRunID)
+		expectFieldEquals(t, body, "workflow_id", workflowID)
+		expectFieldEquals(t, body, "status", "completed")
+	})
+
+	t.Run("failed workflow run details", func(t *testing.T) {
+		workflowName := uniqueWorkflowName("day13-run-read-failed")
+		cleanupWorkflowByName(t, pool, workflowName)
+
+		workflowID := createWorkflowThroughAPI(t, handler, workflowName)
+		taskID := createTaskThroughAPI(t, handler, workflowID, "extract")
+		workflowRunID := createWorkflowRunThroughAPI(t, handler, workflowID, map[string]any{"document_id": "doc-failed"})
+		taskRunID := apiTaskRunIDByTask(t, pool, workflowRunID, taskID)
+		setAPITaskRunStatus(t, pool, taskRunID, workflow.TaskRunStatusRunning)
+		attempt, err := repo.CreateTaskAttempt(context.Background(), taskRunID)
+		if err != nil {
+			t.Fatalf("create task attempt: %v", err)
+		}
+		if _, err := repo.CompleteTaskAttempt(context.Background(), workflow.CompleteTaskAttemptInput{
+			TaskAttemptID: attempt.ID,
+			TaskRunID:     taskRunID,
+			Success:       false,
+			FailureReason: "permanent failure",
+		}); err != nil {
+			t.Fatalf("complete task attempt: %v", err)
+		}
+		if _, changed, err := repo.FinalizeWorkflowRun(context.Background(), workflowRunID); err != nil || !changed {
+			t.Fatalf("finalize workflow run: changed=%t err=%v", changed, err)
+		}
+
+		response := getJSON(t, handler, "/workflows/"+workflowID+"/runs/"+workflowRunID, "")
+		expectStatus(t, response, http.StatusOK)
+		body := decodeJSONBody(t, response)
+		expectFieldEquals(t, body, "status", "failed")
+
+		response = getJSON(t, handler, "/workflows/"+workflowID+"/runs/"+workflowRunID+"/task-runs", "")
+		expectStatus(t, response, http.StatusOK)
+		body = decodeJSONBody(t, response)
+		taskRuns := expectListField(t, body, "task_runs")
+		if len(taskRuns) != 1 {
+			t.Fatalf("expected one task run, got %#v", taskRuns)
+		}
+		taskRun := expectObject(t, taskRuns[0])
+		expectFieldEquals(t, taskRun, "id", taskRunID)
+		expectFieldEquals(t, taskRun, "status", "dead_letter")
+
+		response = getJSON(t, handler, "/workflows/"+workflowID+"/runs/"+workflowRunID+"/task-runs/"+taskRunID+"/attempts", "")
+		expectStatus(t, response, http.StatusOK)
+		body = decodeJSONBody(t, response)
+		attempts := expectListField(t, body, "task_attempts")
+		if len(attempts) != 1 {
+			t.Fatalf("expected one task attempt, got %#v", attempts)
+		}
+		attemptBody := expectObject(t, attempts[0])
+		expectFieldEquals(t, attemptBody, "status", "failed")
+		expectFieldEquals(t, attemptBody, "failure_reason", "permanent failure")
+	})
+}
+
 func TestWorkflowRunIdempotencyKeySemantics(t *testing.T) {
 	t.Run("missing key keeps creating runs", func(t *testing.T) {
 		pool, handler := workflowAPIHandler(t)
@@ -927,6 +1033,50 @@ func expectWorkflowRunCount(t *testing.T, pool *pgxpool.Pool, workflowID string,
 	}
 	if count != want {
 		t.Fatalf("expected %d workflow runs, got %d", want, count)
+	}
+}
+
+func expectListField(t *testing.T, body map[string]any, field string) []any {
+	t.Helper()
+
+	value, ok := body[field].([]any)
+	if !ok {
+		t.Fatalf("expected list field %q, got %#v", field, body[field])
+	}
+	return value
+}
+
+func expectObject(t *testing.T, value any) map[string]any {
+	t.Helper()
+
+	object, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object, got %#v", value)
+	}
+	return object
+}
+
+func apiTaskRunIDByTask(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID string) string {
+	t.Helper()
+
+	var taskRunID string
+	err := pool.QueryRow(context.Background(), `
+		SELECT id
+		FROM task_runs
+		WHERE workflow_run_id = $1
+			AND task_id = $2
+	`, workflowRunID, taskID).Scan(&taskRunID)
+	if err != nil {
+		t.Fatalf("load task run id: %v", err)
+	}
+	return taskRunID
+}
+
+func setAPITaskRunStatus(t *testing.T, pool *pgxpool.Pool, taskRunID string, status workflow.TaskRunStatus) {
+	t.Helper()
+
+	if _, err := pool.Exec(context.Background(), `UPDATE task_runs SET status = $2 WHERE id = $1`, taskRunID, status); err != nil {
+		t.Fatalf("set task run status: %v", err)
 	}
 }
 

@@ -10,6 +10,9 @@ type Repository interface {
 	CreateTask(ctx context.Context, workflowID string, input CreateTaskInput) (Task, error)
 	CreateDependency(ctx context.Context, workflowID string, input CreateDependencyInput) (Dependency, error)
 	CreateWorkflowRun(ctx context.Context, workflowID string, input CreateWorkflowRunInput) (WorkflowRun, error)
+	GetWorkflowRun(ctx context.Context, workflowID, workflowRunID string) (WorkflowRun, error)
+	ListTaskRuns(ctx context.Context, workflowID, workflowRunID string) ([]TaskRun, error)
+	ListTaskAttempts(ctx context.Context, workflowID, workflowRunID, taskRunID string) ([]TaskAttempt, error)
 }
 
 type Service struct {
@@ -70,4 +73,38 @@ func (s *Service) CreateWorkflowRun(ctx context.Context, workflowID string, inpu
 	}
 
 	return s.repo.CreateWorkflowRun(ctx, workflowID, input)
+}
+
+func (s *Service) GetWorkflowRun(ctx context.Context, workflowID, workflowRunID string) (WorkflowRun, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return WorkflowRun{}, ErrWorkflowRunNotFound
+	}
+
+	return s.repo.GetWorkflowRun(ctx, workflowID, workflowRunID)
+}
+
+func (s *Service) ListTaskRuns(ctx context.Context, workflowID, workflowRunID string) ([]TaskRun, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return nil, ErrWorkflowRunNotFound
+	}
+
+	return s.repo.ListTaskRuns(ctx, workflowID, workflowRunID)
+}
+
+func (s *Service) ListTaskAttempts(ctx context.Context, workflowID, workflowRunID, taskRunID string) ([]TaskAttempt, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	taskRunID = strings.TrimSpace(taskRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return nil, ErrWorkflowRunNotFound
+	}
+	if taskRunID == "" {
+		return nil, ErrTaskRunNotFound
+	}
+
+	return s.repo.ListTaskAttempts(ctx, workflowID, workflowRunID, taskRunID)
 }

@@ -28,6 +28,9 @@ type workflowService interface {
 	CreateTask(ctx context.Context, workflowID string, input workflow.CreateTaskInput) (workflow.Task, error)
 	CreateDependency(ctx context.Context, workflowID string, input workflow.CreateDependencyInput) (workflow.Dependency, error)
 	CreateWorkflowRun(ctx context.Context, workflowID string, input workflow.CreateWorkflowRunInput) (workflow.WorkflowRun, error)
+	GetWorkflowRun(ctx context.Context, workflowID, workflowRunID string) (workflow.WorkflowRun, error)
+	ListTaskRuns(ctx context.Context, workflowID, workflowRunID string) ([]workflow.TaskRun, error)
+	ListTaskAttempts(ctx context.Context, workflowID, workflowRunID, taskRunID string) ([]workflow.TaskAttempt, error)
 }
 
 type schedulerService interface {
@@ -75,6 +78,9 @@ func (s *Server) registerRoutes() {
 	s.router.Post("/workflows/{workflowID}/tasks", s.createTask)
 	s.router.Post("/workflows/{workflowID}/dependencies", s.createDependency)
 	s.router.Post("/workflows/{workflowID}/runs", s.createWorkflowRun)
+	s.router.Get("/workflows/{workflowID}/runs/{workflowRunID}", s.getWorkflowRun)
+	s.router.Get("/workflows/{workflowID}/runs/{workflowRunID}/task-runs", s.listTaskRuns)
+	s.router.Get("/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts", s.listTaskAttempts)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
