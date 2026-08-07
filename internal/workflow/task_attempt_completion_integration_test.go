@@ -60,7 +60,7 @@ func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptAndTaskRunCompleted(t 
 	}
 }
 
-func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptAndTaskRunFailed(t *testing.T) {
+func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptFailedAndTaskRunDeadLetter(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
 	repo := NewPostgresRepository(pool)
@@ -83,16 +83,16 @@ func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptAndTaskRunFailed(t *te
 	if result.TaskAttempt.Status != TaskAttemptStatusFailed {
 		t.Fatalf("expected failed task attempt, got %q", result.TaskAttempt.Status)
 	}
-	if result.TaskRun.Status != TaskRunStatusFailed {
-		t.Fatalf("expected failed task run, got %q", result.TaskRun.Status)
+	if result.TaskRun.Status != TaskRunStatusDeadLetter {
+		t.Fatalf("expected dead-letter task run, got %q", result.TaskRun.Status)
 	}
 
 	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
 	if persisted.attemptStatus != TaskAttemptStatusFailed {
 		t.Fatalf("expected persisted attempt status failed, got %q", persisted.attemptStatus)
 	}
-	if persisted.taskRunStatus != TaskRunStatusFailed {
-		t.Fatalf("expected persisted task run status failed, got %q", persisted.taskRunStatus)
+	if persisted.taskRunStatus != TaskRunStatusDeadLetter {
+		t.Fatalf("expected persisted task run status dead_letter, got %q", persisted.taskRunStatus)
 	}
 	if persisted.failureReason == nil || *persisted.failureReason != "random failure" {
 		t.Fatalf("expected trimmed failure reason, got %#v", persisted.failureReason)
@@ -285,8 +285,8 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsLateSuccessAfterFailureWith
 	}
 
 	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
-	if persisted.taskRunStatus != TaskRunStatusFailed {
-		t.Fatalf("expected task run to stay failed, got %q", persisted.taskRunStatus)
+	if persisted.taskRunStatus != TaskRunStatusDeadLetter {
+		t.Fatalf("expected task run to stay dead_letter, got %q", persisted.taskRunStatus)
 	}
 	if persisted.failureReason == nil || *persisted.failureReason != "first failure" {
 		t.Fatalf("expected failure reason to stay first failure, got %#v", persisted.failureReason)

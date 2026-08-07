@@ -166,9 +166,9 @@ func TestValidateTaskRunTransitionAcceptsValidTransitions(t *testing.T) {
 			to:   TaskRunStatusCompleted,
 		},
 		{
-			name: "running to failed",
+			name: "running to dead letter",
 			from: TaskRunStatusRunning,
-			to:   TaskRunStatusFailed,
+			to:   TaskRunStatusDeadLetter,
 		},
 		{
 			name: "running to retry wait",
@@ -216,6 +216,11 @@ func TestValidateTaskRunTransitionRejectsInvalidTransitions(t *testing.T) {
 			name: "queued cannot complete before running",
 			from: TaskRunStatusQueued,
 			to:   TaskRunStatusCompleted,
+		},
+		{
+			name: "running permanent failure must dead letter",
+			from: TaskRunStatusRunning,
+			to:   TaskRunStatusFailed,
 		},
 		{
 			name: "retry wait cannot run before requeue",

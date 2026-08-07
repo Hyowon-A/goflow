@@ -157,6 +157,131 @@ func existingWorkflowRunForIdempotencyKey(ctx context.Context, tx pgx.Tx, workfl
 	return workflowRun, nil
 }
 
+func (r *PostgresRepository) GetWorkflowRun(ctx context.Context, workflowID, workflowRunID string) (WorkflowRun, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return WorkflowRun{}, ErrWorkflowRunNotFound
+	}
+
+	var workflowRun WorkflowRun
+	err := r.db.QueryRow(ctx, `
+		SELECT id, workflow_id, status, input
+		FROM workflow_runs
+		WHERE workflow_id = $1
+			AND id = $2
+	`, workflowID, workflowRunID).Scan(
+		&workflowRun.ID,
+		&workflowRun.WorkflowID,
+		&workflowRun.Status,
+		&workflowRun.Input,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WorkflowRun{}, ErrWorkflowRunNotFound
+		}
+		return WorkflowRun{}, fmt.Errorf("get workflow run: %w", err)
+	}
+
+	return workflowRun, nil
+}
+
+func (r *PostgresRepository) ListTaskRuns(ctx context.Context, workflowID, workflowRunID string) ([]TaskRun, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return nil, ErrWorkflowRunNotFound
+	}
+
+	if _, err := r.GetWorkflowRun(ctx, workflowID, workflowRunID); err != nil {
+		return nil, err
+	}
+
+	rows, err := r.db.Query(ctx, `
+		SELECT id, workflow_id, workflow_run_id, task_id, status
+		FROM task_runs
+		WHERE workflow_id = $1
+			AND workflow_run_id = $2
+		ORDER BY created_at, id
+	`, workflowID, workflowRunID)
+	if err != nil {
+		return nil, fmt.Errorf("list task runs: %w", err)
+	}
+	defer rows.Close()
+
+	var taskRuns []TaskRun
+	for rows.Next() {
+		var taskRun TaskRun
+		if err := rows.Scan(&taskRun.ID, &taskRun.WorkflowID, &taskRun.WorkflowRunID, &taskRun.TaskID, &taskRun.Status); err != nil {
+			return nil, fmt.Errorf("scan task run: %w", err)
+		}
+		taskRuns = append(taskRuns, taskRun)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate task runs: %w", err)
+	}
+
+	return taskRuns, nil
+}
+
+func (r *PostgresRepository) ListTaskAttempts(ctx context.Context, workflowID, workflowRunID, taskRunID string) ([]TaskAttempt, error) {
+	workflowID = strings.TrimSpace(workflowID)
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	taskRunID = strings.TrimSpace(taskRunID)
+	if workflowID == "" || workflowRunID == "" {
+		return nil, ErrWorkflowRunNotFound
+	}
+	if taskRunID == "" {
+		return nil, ErrTaskRunNotFound
+	}
+
+	if _, err := r.GetWorkflowRun(ctx, workflowID, workflowRunID); err != nil {
+		return nil, err
+	}
+
+	var taskRunExists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM task_runs
+			WHERE workflow_id = $1
+				AND workflow_run_id = $2
+				AND id = $3
+		)
+	`, workflowID, workflowRunID, taskRunID).Scan(&taskRunExists)
+	if err != nil {
+		return nil, fmt.Errorf("check task run for attempts: %w", err)
+	}
+	if !taskRunExists {
+		return nil, ErrTaskRunNotFound
+	}
+
+	rows, err := r.db.Query(ctx, `
+		SELECT id, task_run_id, attempt_number, status, COALESCE(failure_reason, '')
+		FROM task_attempts
+		WHERE task_run_id = $1
+		ORDER BY attempt_number
+	`, taskRunID)
+	if err != nil {
+		return nil, fmt.Errorf("list task attempts: %w", err)
+	}
+	defer rows.Close()
+
+	var attempts []TaskAttempt
+	for rows.Next() {
+		var attempt TaskAttempt
+		if err := rows.Scan(&attempt.ID, &attempt.TaskRunID, &attempt.AttemptNumber, &attempt.Status, &attempt.FailureReason); err != nil {
+			return nil, fmt.Errorf("scan task attempt: %w", err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate task attempts: %w", err)
+	}
+
+	return attempts, nil
+}
+
 func (r *PostgresRepository) LoadTaskRunStatus(ctx context.Context, input LoadTaskRunStatusInput) (TaskRunStatus, error) {
 	taskRunID := strings.TrimSpace(input.TaskRunID)
 	if taskRunID == "" {
@@ -388,4 +513,100 @@ func (r *PostgresRepository) QueueDueRetryTaskRuns(ctx context.Context, now time
 	}
 
 	return taskRuns, nil
+}
+
+func (r *PostgresRepository) FinalizeWorkflowRun(ctx context.Context, workflowRunID string) (WorkflowRun, bool, error) {
+	workflowRunID = strings.TrimSpace(workflowRunID)
+	if workflowRunID == "" {
+		return WorkflowRun{}, false, ErrWorkflowRunNotFound
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return WorkflowRun{}, false, fmt.Errorf("begin finalize workflow run: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var workflowRun WorkflowRun
+	var currentStatus WorkflowRunStatus
+	err = tx.QueryRow(ctx, `
+		SELECT id, workflow_id, status, input
+		FROM workflow_runs
+		WHERE id = $1
+		FOR UPDATE
+	`, workflowRunID).Scan(
+		&workflowRun.ID,
+		&workflowRun.WorkflowID,
+		&currentStatus,
+		&workflowRun.Input,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WorkflowRun{}, false, ErrWorkflowRunNotFound
+		}
+		return WorkflowRun{}, false, fmt.Errorf("load workflow run for finalization: %w", err)
+	}
+	workflowRun.Status = string(currentStatus)
+
+	if IsTerminalWorkflowRunStatus(currentStatus) {
+		return workflowRun, false, nil
+	}
+
+	var deadLetterCount int
+	var incompleteCount int
+	err = tx.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE status = $2),
+			COUNT(*) FILTER (WHERE status <> $3)
+		FROM task_runs
+		WHERE workflow_run_id = $1
+	`, workflowRunID, TaskRunStatusDeadLetter, TaskRunStatusCompleted).Scan(&deadLetterCount, &incompleteCount)
+	if err != nil {
+		return WorkflowRun{}, false, fmt.Errorf("count task run finalization state: %w", err)
+	}
+
+	var nextStatus WorkflowRunStatus
+	switch {
+	case deadLetterCount > 0:
+		nextStatus = WorkflowRunStatusFailed
+	case incompleteCount == 0:
+		nextStatus = WorkflowRunStatusCompleted
+	default:
+		return workflowRun, false, nil
+	}
+
+	if currentStatus == WorkflowRunStatusPending {
+		if err := ValidateWorkflowRunTransition(WorkflowRunStatusPending, WorkflowRunStatusRunning); err != nil {
+			return WorkflowRun{}, false, err
+		}
+		if err := ValidateWorkflowRunTransition(WorkflowRunStatusRunning, nextStatus); err != nil {
+			return WorkflowRun{}, false, err
+		}
+	} else if err := ValidateWorkflowRunTransition(currentStatus, nextStatus); err != nil {
+		return WorkflowRun{}, false, err
+	}
+
+	err = tx.QueryRow(ctx, `
+		UPDATE workflow_runs
+		SET status = $2,
+			started_at = COALESCE(started_at, now()),
+			completed_at = now()
+		WHERE id = $1
+		RETURNING id, workflow_id, status, input
+	`, workflowRunID, nextStatus).Scan(
+		&workflowRun.ID,
+		&workflowRun.WorkflowID,
+		&currentStatus,
+		&workflowRun.Input,
+	)
+	if err != nil {
+		return WorkflowRun{}, false, fmt.Errorf("update finalized workflow run: %w", err)
+	}
+	workflowRun.Status = string(currentStatus)
+
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowRun{}, false, fmt.Errorf("commit finalize workflow run: %w", err)
+	}
+
+	return workflowRun, true, nil
 }

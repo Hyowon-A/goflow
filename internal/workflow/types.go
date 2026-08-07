@@ -38,6 +38,7 @@ type TaskAttempt struct {
 	TaskRunID     string
 	AttemptNumber uint
 	Status        TaskAttemptStatus
+	FailureReason string
 }
 
 type CompleteTaskAttemptInput struct {

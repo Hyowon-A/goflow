@@ -25,6 +25,7 @@ type Repository interface {
 	LoadTaskRunExecution(ctx context.Context, input workflow.LoadTaskRunExecutionInput) (workflow.TaskRunExecution, error)
 	CreateTaskAttempt(ctx context.Context, taskRunID string) (workflow.TaskAttempt, error)
 	CompleteTaskAttempt(ctx context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error)
+	FinalizeWorkflowRun(ctx context.Context, workflowRunID string) (workflow.WorkflowRun, bool, error)
 }
 
 type Scheduler interface {
@@ -101,8 +102,11 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 
 	policy, err := workflow.ParseRetryPolicy(taskRunExecution.Config)
 	if err != nil {
-		if completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
+		if _, completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
 			return completeErr
+		}
+		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
+			return err
 		}
 		return s.consumer.AckTask(ctx, message.MessageID)
 	}
@@ -123,8 +127,11 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		if err != nil {
 			reason = err.Error()
 		}
-		if completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, reason); completeErr != nil {
+		if _, completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, reason); completeErr != nil {
 			return completeErr
+		}
+		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
+			return err
 		}
 		return s.consumer.AckTask(ctx, message.MessageID)
 	}
@@ -133,8 +140,11 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 
 	completeInput, err := completeAttemptInput(taskAttempt.ID, message.TaskRunID, result, executeErr)
 	if err != nil {
-		if completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
+		if _, completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
 			return completeErr
+		}
+		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
+			return err
 		}
 		return s.consumer.AckTask(ctx, message.MessageID)
 	}
@@ -142,11 +152,16 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 	completeInput.Retry = decision.Retry
 	completeInput.NextRetryAt = decision.NextRetryAt
 
-	if _, err := s.repo.CompleteTaskAttempt(ctx, completeInput); err != nil {
+	completeResult, err := s.repo.CompleteTaskAttempt(ctx, completeInput)
+	if err != nil {
 		return err
 	}
 
-	if s.scheduler != nil {
+	if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
+		return err
+	}
+
+	if s.scheduler != nil && completeResult.TaskRun.Status == workflow.TaskRunStatusCompleted {
 		if err = s.scheduler.QueueRunnableTaskRuns(ctx, message.WorkflowRunID); err != nil {
 			return err
 		}
@@ -183,14 +198,28 @@ func (s *Service) handleUnclaimableTaskRun(ctx context.Context, message queue.Re
 	}
 }
 
-func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.TaskAttempt, taskRunID, reason string) error {
-	_, err := s.repo.CompleteTaskAttempt(ctx, workflow.CompleteTaskAttemptInput{
+func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.TaskAttempt, taskRunID, reason string) (workflow.CompleteTaskAttemptResult, error) {
+	return s.repo.CompleteTaskAttempt(ctx, workflow.CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     taskRunID,
 		Success:       false,
 		FailureReason: reason,
 	})
-	return err
+}
+
+func (s *Service) finalizeWorkflowRun(ctx context.Context, workflowRunID string) error {
+	workflowRun, changed, err := s.repo.FinalizeWorkflowRun(ctx, workflowRunID)
+	if err != nil {
+		return err
+	}
+	if changed {
+		slog.InfoContext(ctx, "workflow_run_finalized",
+			slog.String("workflow_run_id", workflowRun.ID),
+			slog.String("workflow_id", workflowRun.WorkflowID),
+			slog.String("status", workflowRun.Status),
+		)
+	}
+	return nil
 }
 
 func completeAttemptInput(

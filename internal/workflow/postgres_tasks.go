@@ -145,7 +145,7 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 	retryWait := false
 	if !input.Success {
 		nextAttemptStatus = TaskAttemptStatusFailed
-		nextTaskRunStatus = TaskRunStatusFailed
+		nextTaskRunStatus = TaskRunStatusDeadLetter
 		if input.Retry {
 			nextTaskRunStatus = TaskRunStatusRetryWait
 			nextRetryAt = input.NextRetryAt
