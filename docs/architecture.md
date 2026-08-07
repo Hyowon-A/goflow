@@ -118,6 +118,9 @@ Task runs represent logical task execution inside a workflow run. A task run may
 fail, wait for retry, return to the queue, or move to dead-letter state after it
 can no longer be retried.
 
+The `failed` task-run state remains in the database enum for legacy rows, but
+new permanent task-run failures move to `dead_letter`.
+
 ![Task run state automaton](images/task-run-automaton.svg)
 
 Task attempts represent one physical execution attempt. Attempts start when a
@@ -182,6 +185,9 @@ Implemented workflow API endpoints:
 | `POST` | `/workflows/{workflowID}/tasks` | Create a task definition inside one workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Create a dependency edge between two tasks. |
 | `POST` | `/workflows/{workflowID}/runs` | Create a workflow run and pending task runs transactionally. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Read workflow-run status and input. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs` | List task-run statuses for one workflow run. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts` | List task attempts and failure reasons. |
 
 Workflow-run creation accepts an optional `Idempotency-Key` header. The key is
 scoped to the workflow ID for this endpoint. Repeating the same key with the
@@ -273,9 +279,10 @@ current worker flow processes one message at a time:
 5. Create a running `task_attempt`.
 6. Validate task retry policy.
 7. Resolve and run the configured executor.
-8. Complete the task attempt and task run as `completed`, `failed` or
+8. Complete the task attempt and task run as `completed`, `dead_letter` or
    `retry_wait`.
-9. Acknowledge the Redis message only after completion is persisted.
+9. Finalize the workflow run when all task runs are terminal.
+10. Acknowledge the Redis message only after completion is persisted.
 
 ```mermaid
 flowchart TD
@@ -285,7 +292,8 @@ flowchart TD
     Claim -->|succeeds| Work[Load task and create attempt]
     Work --> Execute[Executor.Execute]
     Execute --> Complete[CompleteTaskAttempt]
-    Complete --> Ack[XACK message_id]
+    Complete --> Finalize[Finalize workflow run]
+    Finalize --> Ack[XACK message_id]
     Complete -->|retryable failure| RetryWait[retry_wait until next_retry_at]
     Ack --> Removed[Redis pending entry removed]
     Claim -->|fails| Status[Load current task-run status]
@@ -302,7 +310,14 @@ loop forever.
 Retry decisions use the current attempt number, parsed policy and executor
 retryability. Unknown executor types and non-retryable executor failures are
 permanent failures. Retryable failures with attempts remaining move the task run
-to `retry_wait` and set `next_retry_at`; exhausted attempts move to `failed`.
+to `retry_wait` and set `next_retry_at`; exhausted attempts move to
+`dead_letter`.
+
+Workflow finalization runs after each persisted attempt outcome. A workflow run
+becomes `completed` once every task run is `completed`, becomes `failed` when
+any task run is `dead_letter`, and stays unchanged while any task run is still
+pending, queued, running or waiting for retry. Finalization is idempotent and
+logs `workflow_run_finalized` when the workflow-run status changes.
 
 If the claim fails, the worker checks PostgreSQL before acknowledging. Messages
 for task runs already `running`, `completed`, `failed` or `dead_letter` are
@@ -321,8 +336,8 @@ Built-in executors are intentionally small:
 | `log` | Logs a message from task config or task-run input and returns it as output. |
 | `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
 
-Redis pending-message recovery, leases and dead-letter handling remain future
-work.
+Redis pending-message recovery, leases and manual dead-letter replay remain
+future work.
 
 ## DAG Scheduling
 

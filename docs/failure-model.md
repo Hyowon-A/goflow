@@ -128,9 +128,17 @@ attempt. Unknown task runs, ambiguous lookup failures and non-ready states stay
 pending. Duplicate acknowledgements are logged with workflow, task, Redis
 message, worker and reason fields.
 
+Permanent task failures use `dead_letter` as the terminal logical task-run
+state. Failed task attempts keep the failure reason; task runs do not duplicate
+the full attempt history. Dead-lettered task runs are not automatically retried.
+After each persisted task outcome, workflow finalization marks the workflow run
+`completed` when all task runs completed or `failed` when any task run
+dead-lettered. API clients can inspect the workflow run, its task runs and task
+attempt failure reasons through the read endpoints.
+
 ## Remaining Worker Failure Handling
 
 Workers process tasks with at-least-once delivery semantics. Task execution
 must be idempotent or guarded against duplicate side effects. Worker leases,
-heartbeats, expired-lease recovery and dead-letter inspection remain future
+heartbeats, expired-lease recovery and manual dead-letter replay remain future
 work.

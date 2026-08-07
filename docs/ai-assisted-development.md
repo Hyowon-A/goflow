@@ -209,6 +209,34 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./internal/worker -count=1`
 - Ran `go test ./internal/scheduler -count=1`
 
+## Day 13
+
+### AI-assisted work
+
+- Moved permanent task-run outcomes from final `failed` paths to terminal `dead_letter`
+- Added idempotent workflow-run finalization after task outcomes persist
+- Marked workflow runs `completed` when every task run completed and `failed` when any task run dead-lettered
+- Wired worker completion to finalize before acknowledgement and to schedule successors only after completed task runs
+- Added read APIs for workflow runs, task runs and task attempts with failure reasons
+- Added tests for workflow finalization, dead-letter persistence, worker finalization ordering and inspection endpoints
+
+### Accepted suggestions
+
+- Kept failure detail on `task_attempts` instead of copying full failure history to task runs or workflow runs
+- Reused existing `dead_letter` task-run status as the durable permanent-failure state
+- Kept finalization in the workflow repository and called it from the worker after persistence
+- Skipped pagination for inspection endpoints until result sizes prove it is needed
+
+### Rejected suggestions
+
+- Rejected manual dead-letter replay during Day 13
+- Rejected worker leases and expired-lease recovery during Day 13
+- Rejected dashboards, metrics and a separate failures table during Day 13
+
+### Validation performed
+
+- Ran `go test ./internal/workflow ./internal/httpserver ./internal/worker`
+
 ## Day 3
 
 ### AI-assisted work

@@ -243,6 +243,9 @@ which overrides the code default during local development.
 | `POST` | `/workflows/{workflowID}/tasks` | Creates a task definition inside a workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Creates a dependency between two tasks in a workflow. |
 | `POST` | `/workflows/{workflowID}/runs` | Creates a workflow run and one pending task run per task. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Gets workflow-run status and input. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs` | Lists task runs for a workflow run. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts` | Lists attempts and failure reasons for a task run. |
 
 Example local workflow run:
 
@@ -263,6 +266,10 @@ curl -sS -X POST "$API/workflows/$WORKFLOW_ID/runs" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-run-1' \
   -d '{"input":{"source":"readme"}}'
+
+RUN_ID=<id from workflow run response>
+
+curl -sS "$API/workflows/$WORKFLOW_ID/runs/$RUN_ID"
 ```
 
 API errors use a consistent JSON shape:

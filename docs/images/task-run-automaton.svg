@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 460" width="980" height="460" role="img" aria-labelledby="tr-title tr-desc">
   <title id="tr-title">Task run state automaton</title>
-  <desc id="tr-desc">States: pending, queued, running, completed, failed, retry_wait, dead_letter. pending to queued to running. running to completed or failed. failed to retry_wait or dead_letter. retry_wait back to queued. completed and dead_letter are terminal states.</desc>
+  <desc id="tr-desc">States shown: pending, queued, running, completed, retry_wait, dead_letter. pending to queued to running. running to completed, retry_wait or dead_letter. retry_wait back to queued. completed and dead_letter are terminal states.</desc>
   <style>
     .node-fill { fill: #f6f7f9; }
     .node-border { stroke: #24292f; stroke-width: 1.8; }
@@ -29,15 +29,10 @@
   <path d="M180,95 L260,95" class="edge" marker-end="url(#arrow)"/>
   <path d="M400,95 L480,95" class="edge" marker-end="url(#arrow)"/>
 
-  <!-- running -> completed / failed -->
+  <!-- running -> completed / retry_wait / dead_letter -->
   <path d="M620,82 Q690,55 736,45" class="edge" marker-end="url(#arrow)"/>
-  <path d="M620,108 Q690,150 740,193" class="edge" marker-end="url(#arrow)"/>
-
-  <!-- failed -> dead_letter -->
-  <path d="M812,220 Q822,280 829,334" class="edge" marker-end="url(#arrow)"/>
-
-  <!-- failed -> retry_wait -->
-  <path d="M740,205 Q690,250 612,278" class="edge" marker-end="url(#arrow)"/>
+  <path d="M550,120 C550,178 548,226 546,280" class="edge" marker-end="url(#arrow)"/>
+  <path d="M620,110 Q700,240 736,360" class="edge" marker-end="url(#arrow)"/>
 
   <!-- retry_wait -> queued (retry loop) -->
   <path d="M500,280 C 430,220 380,160 335,122" class="edge" marker-end="url(#arrow)"/>
@@ -55,9 +50,6 @@
   <rect x="742" y="20" width="164" height="50" rx="9" class="node-fill node-border"/>
   <text x="824" y="50" class="text">COMPLETED</text>
 
-  <rect x="740" y="170" width="140" height="50" rx="10" class="node-fill node-border"/>
-  <text x="810" y="200" class="text">FAILED</text>
-
   <rect x="460" y="280" width="170" height="50" rx="10" class="node-fill node-border"/>
   <text x="545" y="310" class="text">RETRY_WAIT</text>
 
@@ -65,5 +57,5 @@
   <rect x="742" y="340" width="174" height="50" rx="9" class="node-fill node-border"/>
   <text x="829" y="370" class="text">DEAD_LETTER</text>
 
-  <text x="20" y="440" class="caption">Double border = terminal state. Retry loop: failed -&gt; retry_wait -&gt; queued.</text>
+  <text x="20" y="440" class="caption">Double border = terminal state. Retry loop: retry_wait -&gt; queued.</text>
 </svg>

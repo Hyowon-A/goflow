@@ -81,6 +81,9 @@ crash-before-publish recovery with a fake publisher.
 - `POST /workflows/{workflowID}/tasks`
 - `POST /workflows/{workflowID}/dependencies`
 - `POST /workflows/{workflowID}/runs`
+- `GET /workflows/{workflowID}/runs/{workflowRunID}`
+- `GET /workflows/{workflowID}/runs/{workflowRunID}/task-runs`
+- `GET /workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts`
 - Invalid JSON bodies
 - Missing required fields
 - Invalid UUID path parameters
@@ -114,6 +117,9 @@ crash-before-publish recovery with a fake publisher.
 - Due retry queueing through transactional outbox rows
 - Retry execution as attempt 2 and later
 - Exhausted, non-retryable and invalid-policy retry failure cases
+- Permanent failures moving task runs to `dead_letter`
+- Workflow-run finalization to `completed` or `failed`
+- Workflow-run, task-run and task-attempt inspection APIs
 - Built-in worker executors
 - Worker receive, claim, execute, complete and acknowledgement coordination
 - Duplicate queue-message acknowledgement and logging
