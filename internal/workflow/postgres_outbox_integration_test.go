@@ -120,6 +120,36 @@ func TestPostgresRepositoryRecordTaskOutboxEventFailureLeavesRowClaimable(t *tes
 	}
 }
 
+func TestPostgresRepositoryCountPendingTaskOutboxEvents(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	events := seedPendingTaskOutboxEvents(t, pool, 2)
+	repo := NewPostgresRepository(pool)
+
+	count, err := repo.CountPendingTaskOutboxEvents(context.Background())
+	if err != nil {
+		t.Fatalf("count pending outbox events: %v", err)
+	}
+	if count < int64(len(events)) {
+		t.Fatalf("expected at least %d pending outbox events, got %d", len(events), count)
+	}
+
+	claimed, err := repo.ClaimPendingTaskOutboxEvents(context.Background())
+	if err != nil {
+		t.Fatalf("claim pending task outbox events: %v", err)
+	}
+	if len(claimed) == 0 {
+		t.Fatal("expected claimed outbox events")
+	}
+
+	afterClaim, err := repo.CountPendingTaskOutboxEvents(context.Background())
+	if err != nil {
+		t.Fatalf("count pending outbox events after claim: %v", err)
+	}
+	if afterClaim > count-int64(len(claimed)) {
+		t.Fatalf("expected pending count to drop after claim, before=%d after=%d claimed=%d", count, afterClaim, len(claimed))
+	}
+}
+
 func seedPendingTaskOutboxEvents(t *testing.T, pool *pgxpool.Pool, count int) []TaskOutboxEvent {
 	t.Helper()
 

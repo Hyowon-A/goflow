@@ -88,3 +88,16 @@ func (r *PostgresRepository) RecordTaskOutboxEventFailure(ctx context.Context, i
 	}
 	return nil
 }
+
+func (r *PostgresRepository) CountPendingTaskOutboxEvents(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM task_outbox_events
+		WHERE status = 'pending'
+	`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count pending task outbox events: %w", err)
+	}
+	return count, nil
+}

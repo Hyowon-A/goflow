@@ -94,6 +94,122 @@ func TestServiceProcessOneLogsWorkflowRunFinalization(t *testing.T) {
 	}
 }
 
+func TestServiceFinalizeWorkflowRunIncrementsTerminalMetrics(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     workflow.WorkflowRunStatus
+		metricName string
+	}{
+		{
+			name:       "completed",
+			status:     workflow.WorkflowRunStatusCompleted,
+			metricName: "goflow_workflow_runs_completed_total",
+		},
+		{
+			name:       "failed",
+			status:     workflow.WorkflowRunStatusFailed,
+			metricName: "goflow_workflow_runs_failed_total",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newServiceTestFixture()
+			metrics := &fakeMetrics{}
+			fixture.service.metrics = metrics
+			fixture.repo.finalizeChanged = true
+			fixture.repo.finalizeWorkflowRun = workflow.WorkflowRun{
+				ID:         "workflow-run-id",
+				WorkflowID: "workflow-id",
+				Status:     string(tt.status),
+			}
+
+			if err := fixture.service.finalizeWorkflowRun(context.Background(), "workflow-run-id"); err != nil {
+				t.Fatalf("finalize workflow run: %v", err)
+			}
+
+			if got := metrics.counts[tt.metricName]; got != 1 {
+				t.Fatalf("expected %s to increment once, got %d", tt.metricName, got)
+			}
+		})
+	}
+}
+
+func TestServiceFinalizeWorkflowRunDoesNotIncrementMetricsWhenUnchanged(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.repo.finalizeChanged = false
+	fixture.repo.finalizeWorkflowRun = workflow.WorkflowRun{
+		ID:         "workflow-run-id",
+		WorkflowID: "workflow-id",
+		Status:     string(workflow.WorkflowRunStatusCompleted),
+	}
+
+	if err := fixture.service.finalizeWorkflowRun(context.Background(), "workflow-run-id"); err != nil {
+		t.Fatalf("finalize workflow run: %v", err)
+	}
+
+	if len(metrics.counts) != 0 {
+		t.Fatalf("expected no metrics for unchanged finalization, got %#v", metrics.counts)
+	}
+}
+
+func TestServiceProcessOneIncrementsTaskCompletionMetrics(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	for name, want := range map[string]int{
+		"goflow_task_attempts_completed_total": 1,
+		"goflow_task_runs_completed_total":     1,
+	} {
+		if got := metrics.counts[name]; got != want {
+			t.Fatalf("expected %s=%d, got %d", name, want, got)
+		}
+	}
+}
+
+func TestServiceProcessOneIncrementsTaskFailureMetrics(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.executor.result = ExecutionResult{FailureReason: "failed"}
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	for name, want := range map[string]int{
+		"goflow_task_attempts_failed_total":    1,
+		"goflow_task_runs_dead_lettered_total": 1,
+	} {
+		if got := metrics.counts[name]; got != want {
+			t.Fatalf("expected %s=%d, got %d", name, want, got)
+		}
+	}
+}
+
+func TestServiceProcessOneIncrementsAcknowledgedMetric(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	if got := metrics.counts["goflow_worker_messages_acknowledged_total"]; got != 1 {
+		t.Fatalf("expected acknowledged metric once, got %d", got)
+	}
+}
+
 func TestServiceProcessOneDoesNotAckWhenQueueReadTimesOut(t *testing.T) {
 	fixture := newServiceTestFixture()
 	fixture.consumer.receiveErr = queue.ErrNoMessage
@@ -165,6 +281,70 @@ func TestServiceProcessOneAcknowledgesDuplicateMessagesForKnownNonQueuedStates(t
 				}
 			}
 		})
+	}
+}
+
+func TestServiceProcessOneIncrementsAcknowledgedMetricForDuplicateMessage(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.claimer.claimErr = workflow.ErrTaskRunNotClaimable
+	fixture.repo.taskRunStatus = workflow.TaskRunStatusCompleted
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process duplicate message: %v", err)
+	}
+
+	if got := metrics.counts["goflow_worker_messages_acknowledged_total"]; got != 1 {
+		t.Fatalf("expected acknowledged metric once, got %d", got)
+	}
+}
+
+func TestServiceLogsDoNotIncludeExecutorPayloads(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	duplicate := newServiceTestFixture()
+	duplicate.claimer.claimErr = workflow.ErrTaskRunNotClaimable
+	duplicate.repo.taskRunStatus = workflow.TaskRunStatusCompleted
+	duplicate.repo.execution.Config = map[string]any{"token": "secret-config"}
+	duplicate.repo.execution.TaskRunInput = map[string]any{"document": "secret-input"}
+	if err := duplicate.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process duplicate message: %v", err)
+	}
+
+	failed := newServiceTestFixture()
+	failed.repo.execution.Config = map[string]any{"token": "secret-config"}
+	failed.repo.execution.TaskRunInput = map[string]any{"document": "secret-input"}
+	failed.executor.result = ExecutionResult{
+		Output:        map[string]any{"document": "secret-output"},
+		FailureReason: "secret-failure",
+	}
+	failed.repo.finalizeChanged = true
+	failed.repo.finalizeWorkflowRun = workflow.WorkflowRun{
+		ID:         "workflow-run-id",
+		WorkflowID: "workflow-id",
+		Status:     string(workflow.WorkflowRunStatusFailed),
+	}
+	if err := failed.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process failed task: %v", err)
+	}
+
+	logOutput := logs.String()
+	for _, want := range []string{
+		`"msg":"duplicate_task_message"`,
+		`"msg":"workflow_run_finalized"`,
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("expected log output to contain %s, got %s", want, logOutput)
+		}
+	}
+	for _, secret := range []string{"secret-config", "secret-input", "secret-output", "secret-failure"} {
+		if strings.Contains(logOutput, secret) {
+			t.Fatalf("expected log output not to contain %q, got %s", secret, logOutput)
+		}
 	}
 }
 
@@ -260,6 +440,31 @@ func TestServiceProcessOneDoesNotAckWhenLateCompletionIsRejected(t *testing.T) {
 	}
 }
 
+func TestServiceProcessOneIncrementsLateCompletionPendingMetrics(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+	fixture.repo.completeErr = workflow.ErrTaskAttemptNotCompletable
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, workflow.ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
+	}
+
+	for name, want := range map[string]int{
+		"goflow_worker_late_completions_rejected_total": 1,
+		"goflow_worker_messages_left_pending_total":     1,
+	} {
+		if got := metrics.counts[name]; got != want {
+			t.Fatalf("expected %s=%d, got %d", name, want, got)
+		}
+	}
+	if got := metrics.counts["goflow_worker_messages_acknowledged_total"]; got != 0 {
+		t.Fatalf("expected no acknowledged metric, got %d", got)
+	}
+}
+
 func TestServiceProcessOneDoesNotCompleteOrAckWhenHeartbeatLosesLease(t *testing.T) {
 	fixture := newServiceTestFixture()
 	fixture.service.config.HeartbeatInterval = time.Millisecond
@@ -278,6 +483,49 @@ func TestServiceProcessOneDoesNotCompleteOrAckWhenHeartbeatLosesLease(t *testing
 	}
 	if len(fixture.consumer.acks) != 0 {
 		t.Fatalf("expected no ack after lost lease, got %#v", fixture.consumer.acks)
+	}
+}
+
+func TestServiceProcessOneIncrementsHeartbeatFailureAndPendingMetrics(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.service.config.HeartbeatInterval = time.Millisecond
+	fixture.repo.extendErr = workflow.ErrTaskRunLeaseNotExtensible
+	fixture.executor.waitForCancel = true
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, workflow.ErrTaskRunLeaseNotExtensible) {
+		t.Fatalf("expected ErrTaskRunLeaseNotExtensible, got %v", err)
+	}
+
+	for name, want := range map[string]int{
+		"goflow_worker_lease_heartbeat_failures_total": 1,
+		"goflow_worker_messages_left_pending_total":    1,
+	} {
+		if got := metrics.counts[name]; got != want {
+			t.Fatalf("expected %s=%d, got %d", name, want, got)
+		}
+	}
+	if got := metrics.counts["goflow_worker_messages_acknowledged_total"]; got != 0 {
+		t.Fatalf("expected no acknowledged metric, got %d", got)
+	}
+}
+
+func TestServiceProcessOneIncrementsSuccessfulHeartbeatMetric(t *testing.T) {
+	fixture := newServiceTestFixture()
+	metrics := &fakeMetrics{}
+	fixture.service.metrics = metrics
+	fixture.service.config.HeartbeatInterval = time.Millisecond
+	fixture.executor.sleep = 5 * time.Millisecond
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+
+	if err := fixture.service.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("process one task: %v", err)
+	}
+
+	if got := metrics.counts["goflow_worker_lease_heartbeats_total"]; got == 0 {
+		t.Fatal("expected at least one successful heartbeat metric")
 	}
 }
 
@@ -493,7 +741,7 @@ func (r *fakeExecutionRepository) CompleteTaskAttempt(_ context.Context, input w
 		*r.events = append(*r.events, "complete")
 	}
 	return workflow.CompleteTaskAttemptResult{
-		TaskAttempt: workflow.TaskAttempt{ID: input.TaskAttemptID, TaskRunID: input.TaskRunID},
+		TaskAttempt: workflow.TaskAttempt{ID: input.TaskAttemptID, TaskRunID: input.TaskRunID, Status: completedAttemptStatus(input)},
 		TaskRun:     workflow.TaskRun{ID: input.TaskRunID, Status: completedTaskRunStatus(input)},
 	}, nil
 }
@@ -534,11 +782,19 @@ func completedTaskRunStatus(input workflow.CompleteTaskAttemptInput) workflow.Ta
 	return workflow.TaskRunStatusDeadLetter
 }
 
+func completedAttemptStatus(input workflow.CompleteTaskAttemptInput) workflow.TaskAttemptStatus {
+	if input.Success {
+		return workflow.TaskAttemptStatusCompleted
+	}
+	return workflow.TaskAttemptStatusFailed
+}
+
 type fakeExecutionExecutor struct {
 	result        ExecutionResult
 	err           error
 	inputs        []ExecutionInput
 	waitForCancel bool
+	sleep         time.Duration
 }
 
 func (e *fakeExecutionExecutor) Execute(ctx context.Context, input ExecutionInput) (ExecutionResult, error) {
@@ -546,6 +802,13 @@ func (e *fakeExecutionExecutor) Execute(ctx context.Context, input ExecutionInpu
 	if e.waitForCancel {
 		<-ctx.Done()
 		return ExecutionResult{}, ctx.Err()
+	}
+	if e.sleep > 0 {
+		select {
+		case <-time.After(e.sleep):
+		case <-ctx.Done():
+			return ExecutionResult{}, ctx.Err()
+		}
 	}
 	return e.result, e.err
 }
@@ -562,4 +825,15 @@ func (s *fakeScheduler) QueueRunnableTaskRuns(_ context.Context, workflowRunID s
 		*s.events = append(*s.events, "schedule")
 	}
 	return s.err
+}
+
+type fakeMetrics struct {
+	counts map[string]int
+}
+
+func (m *fakeMetrics) Inc(name string) {
+	if m.counts == nil {
+		m.counts = map[string]int{}
+	}
+	m.counts[name]++
 }

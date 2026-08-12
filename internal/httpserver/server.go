@@ -6,17 +6,19 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Hyowon-A/goflow/internal/metrics"
 	"github.com/Hyowon-A/goflow/internal/workflow"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Server struct {
-	router    *chi.Mux
-	db        databasePinger
-	workflows workflowService
-	scheduler schedulerService
-	logger    *slog.Logger
+	router          *chi.Mux
+	db              databasePinger
+	workflows       workflowService
+	scheduler       schedulerService
+	logger          *slog.Logger
+	metricsRegistry *metrics.Registry
 }
 
 type databasePinger interface {
@@ -38,9 +40,16 @@ type schedulerService interface {
 }
 
 func New(db *pgxpool.Pool, schedulers ...schedulerService) *Server {
+	return NewWithMetrics(db, nil, schedulers...)
+}
+
+func NewWithMetrics(db *pgxpool.Pool, registry *metrics.Registry, schedulers ...schedulerService) *Server {
 	repo := workflow.NewPostgresRepository(db)
-	service := workflow.NewService(repo)
+	service := workflow.NewServiceWithMetrics(repo, registry)
 	server := newServer(db, service)
+	if registry != nil {
+		server.metricsRegistry = registry
+	}
 	if len(schedulers) > 0 {
 		server.scheduler = schedulers[0]
 	}
@@ -54,10 +63,11 @@ func newServer(db databasePinger, services ...workflowService) *Server {
 	}
 
 	server := &Server{
-		router:    chi.NewRouter(),
-		db:        db,
-		workflows: workflows,
-		logger:    slog.Default(),
+		router:          chi.NewRouter(),
+		db:              db,
+		workflows:       workflows,
+		logger:          slog.Default(),
+		metricsRegistry: metrics.NewRegistry(),
 	}
 
 	server.useMiddleware()
@@ -73,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) registerRoutes() {
 	s.router.Get("/health", s.health)
 	s.router.Get("/ready", s.readiness)
+	s.router.Get("/metrics", s.metrics)
 
 	s.router.Post("/workflows", s.createWorkflow)
 	s.router.Post("/workflows/{workflowID}/tasks", s.createTask)
@@ -103,4 +114,8 @@ func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ready",
 	})
+}
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	s.metricsRegistry.Handler().ServeHTTP(w, r)
 }

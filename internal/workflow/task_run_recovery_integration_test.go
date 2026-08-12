@@ -177,6 +177,52 @@ func TestPostgresRepositoryRecoverExpiredRunningTaskRunsRecoveredTaskCanBeClaime
 	}
 }
 
+func TestPostgresRepositoryCountRunningTaskRuns(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	repo := NewPostgresRepository(pool)
+
+	running := seedTaskRunForClaim(t, pool, TaskRunStatusRunning)
+	seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	seedTaskRunForClaim(t, pool, TaskRunStatusCompleted)
+	seedTaskRunForClaim(t, pool, TaskRunStatusDeadLetter)
+
+	count, err := repo.CountRunningTaskRuns(context.Background())
+	if err != nil {
+		t.Fatalf("count running task runs: %v", err)
+	}
+	if count < 1 {
+		t.Fatalf("expected at least one running task run, got %d", count)
+	}
+	status, _ := taskRunStatusAndStartedAt(t, pool, running.taskRunID)
+	if status != TaskRunStatusRunning {
+		t.Fatalf("expected seeded running task run to stay running, got %q", status)
+	}
+}
+
+func TestPostgresRepositoryCountExpiredRunningTaskRuns(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	repo := NewPostgresRepository(pool)
+
+	seedLeasedRunningTaskRun(t, pool, 1, 2, time.Now().Add(-time.Minute))
+	seedLeasedRunningTaskRun(t, pool, 1, 2, time.Now().Add(time.Hour))
+	terminal := seedTaskRunForClaim(t, pool, TaskRunStatusDeadLetter)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE task_runs
+		SET lease_expires_at = now() - interval '1 minute'
+		WHERE id = $1
+	`, terminal.taskRunID); err != nil {
+		t.Fatalf("set terminal expired lease: %v", err)
+	}
+
+	count, err := repo.CountExpiredRunningTaskRuns(context.Background())
+	if err != nil {
+		t.Fatalf("count expired running task runs: %v", err)
+	}
+	if count < 1 {
+		t.Fatalf("expected at least one expired running task run, got %d", count)
+	}
+}
+
 type leasedRunningTaskRunFixture struct {
 	taskRunClaimFixture
 	attemptID string

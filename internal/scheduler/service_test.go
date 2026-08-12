@@ -217,6 +217,41 @@ func TestServiceQueueDueRetryTaskRunsReturnsErrors(t *testing.T) {
 	}
 }
 
+func TestServiceIncrementsQueueAndRecoveryMetrics(t *testing.T) {
+	repo := &fakeRepository{
+		taskRuns: []workflow.TaskRun{
+			{ID: "task-run-1"},
+			{ID: "task-run-2"},
+		},
+		retryTaskRuns: []workflow.TaskRun{
+			{ID: "retry-task-run"},
+		},
+		recoveredTaskRuns: []workflow.TaskRun{
+			{ID: "recovered-task-run-1"},
+			{ID: "recovered-task-run-2"},
+		},
+	}
+	metrics := &fakeMetrics{}
+	service := NewServiceWithMetrics(repo, &fakePublisher{}, metrics)
+
+	if err := service.QueueRunnableTaskRuns(context.Background(), "workflow-run"); err != nil {
+		t.Fatalf("queue runnable task runs: %v", err)
+	}
+	if err := service.QueueDueRetryTaskRuns(context.Background(), time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("queue due retry task runs: %v", err)
+	}
+	if err := service.RecoverExpiredRunningTaskRuns(context.Background()); err != nil {
+		t.Fatalf("recover expired task runs: %v", err)
+	}
+
+	if got := metrics.counts["goflow_task_runs_queued_total"]; got != 5 {
+		t.Fatalf("expected queued metric to add all queued rows, got %d", got)
+	}
+	if got := metrics.counts["goflow_worker_lease_recoveries_total"]; got != 2 {
+		t.Fatalf("expected lease recovery metric to add recovered rows, got %d", got)
+	}
+}
+
 func TestServiceRecoverExpiredRunningTaskRunsLogsAndDispatchesOutboxEvents(t *testing.T) {
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
@@ -251,6 +286,9 @@ func TestServiceRecoverExpiredRunningTaskRunsLogsAndDispatchesOutboxEvents(t *te
 	}
 	for _, want := range []string{
 		`"msg":"expired_task_run_recovered"`,
+		`"workflow_id":"workflow"`,
+		`"workflow_run_id":"workflow-run"`,
+		`"task_id":"task-1"`,
 		`"task_run_id":"task-run-1"`,
 		`"previous_worker_id":"worker-1"`,
 	} {
@@ -358,4 +396,19 @@ func (p *fakePublisher) PublishTask(_ context.Context, message queue.TaskMessage
 		return "", p.err
 	}
 	return "message-id", nil
+}
+
+type fakeMetrics struct {
+	counts map[string]uint64
+}
+
+func (m *fakeMetrics) Inc(name string) {
+	m.Add(name, 1)
+}
+
+func (m *fakeMetrics) Add(name string, count uint64) {
+	if m.counts == nil {
+		m.counts = map[string]uint64{}
+	}
+	m.counts[name] += count
 }

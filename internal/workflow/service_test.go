@@ -8,6 +8,8 @@ import (
 
 type fakeRepository struct {
 	createDepErr error
+	createRunErr error
+	workflowRun  WorkflowRun
 
 	createdDependencies []CreateDependencyInput
 }
@@ -34,7 +36,10 @@ func (r *fakeRepository) CreateDependency(_ context.Context, workflowID string, 
 }
 
 func (r *fakeRepository) CreateWorkflowRun(context.Context, string, CreateWorkflowRunInput) (WorkflowRun, error) {
-	return WorkflowRun{}, ErrNotImplemented
+	if r.createRunErr != nil {
+		return WorkflowRun{}, r.createRunErr
+	}
+	return r.workflowRun, nil
 }
 
 func (r *fakeRepository) GetWorkflowRun(context.Context, string, string) (WorkflowRun, error) {
@@ -129,5 +134,48 @@ func TestServiceCreateDependencyRejectsCrossWorkflowTaskReference(t *testing.T) 
 	})
 	if !errors.Is(err, ErrInvalidTaskReference) {
 		t.Fatalf("expected ErrInvalidTaskReference, got %v", err)
+	}
+}
+
+type fakeMetrics struct {
+	counts map[string]int
+}
+
+func (m *fakeMetrics) Inc(name string) {
+	if m.counts == nil {
+		m.counts = map[string]int{}
+	}
+	m.counts[name]++
+}
+
+func TestServiceCreateWorkflowRunIncrementsStartedMetricForNewRun(t *testing.T) {
+	repo := &fakeRepository{
+		workflowRun: WorkflowRun{ID: "run-1"},
+	}
+	metrics := &fakeMetrics{}
+	service := NewServiceWithMetrics(repo, metrics)
+
+	if _, err := service.CreateWorkflowRun(context.Background(), "workflow", CreateWorkflowRunInput{}); err != nil {
+		t.Fatalf("create workflow run: %v", err)
+	}
+
+	if got := metrics.counts["goflow_workflow_runs_started_total"]; got != 1 {
+		t.Fatalf("expected started metric to increment once, got %d", got)
+	}
+}
+
+func TestServiceCreateWorkflowRunDoesNotIncrementStartedMetricForIdempotencyReplay(t *testing.T) {
+	repo := &fakeRepository{
+		workflowRun: WorkflowRun{ID: "run-1", IdempotencyReused: true},
+	}
+	metrics := &fakeMetrics{}
+	service := NewServiceWithMetrics(repo, metrics)
+
+	if _, err := service.CreateWorkflowRun(context.Background(), "workflow", CreateWorkflowRunInput{}); err != nil {
+		t.Fatalf("create workflow run: %v", err)
+	}
+
+	if got := metrics.counts["goflow_workflow_runs_started_total"]; got != 0 {
+		t.Fatalf("expected started metric to stay zero, got %d", got)
 	}
 }

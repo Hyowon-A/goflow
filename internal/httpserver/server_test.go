@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/Hyowon-A/goflow/internal/metrics"
 )
 
 type fakePinger struct {
@@ -96,5 +99,29 @@ func TestReadinessReturnsUnavailableWhenDatabasePingFails(t *testing.T) {
 
 	if body["reason"] != "database unavailable" {
 		t.Fatalf("expected database unavailable reason, got %q", body["reason"])
+	}
+}
+
+func TestMetricsReturnsPrometheusText(t *testing.T) {
+	registry := metrics.NewRegistry()
+	registry.Inc("goflow_workflow_runs_started_total")
+	server := newServer(fakePinger{})
+	server.metricsRegistry = registry
+
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, response.Code)
+	}
+
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/plain; version=0.0.4" {
+		t.Fatalf("expected Prometheus text content type, got %q", contentType)
+	}
+
+	if body := response.Body.String(); !strings.Contains(body, "goflow_workflow_runs_started_total 1\n") {
+		t.Fatalf("expected incremented workflow-start metric, got:\n%s", body)
 	}
 }

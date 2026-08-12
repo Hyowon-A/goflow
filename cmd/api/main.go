@@ -15,6 +15,7 @@ import (
 	"github.com/Hyowon-A/goflow/internal/config"
 	"github.com/Hyowon-A/goflow/internal/database"
 	"github.com/Hyowon-A/goflow/internal/httpserver"
+	"github.com/Hyowon-A/goflow/internal/metrics"
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/scheduler"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -57,7 +58,12 @@ func run() error {
 	}
 	defer publisher.Close()
 
-	app := httpserver.New(db, scheduler.NewService(repo, publisher))
+	registry := metrics.NewRegistry()
+	registry.Gauge("goflow_outbox_pending", repo.CountPendingTaskOutboxEvents)
+	registry.Gauge("goflow_task_runs_running", repo.CountRunningTaskRuns)
+	registry.Gauge("goflow_task_runs_expired_leases", repo.CountExpiredRunningTaskRuns)
+
+	app := httpserver.NewWithMetrics(db, registry, scheduler.NewServiceWithMetrics(repo, publisher, registry))
 
 	server := &http.Server{
 		Addr:              cfg.Address(),

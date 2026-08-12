@@ -35,6 +35,10 @@ type Scheduler interface {
 	QueueRunnableTaskRuns(ctx context.Context, workflowRunID string) error
 }
 
+type Metrics interface {
+	Inc(string)
+}
+
 type Service struct {
 	config    ServiceConfig
 	consumer  queue.TaskConsumer
@@ -42,6 +46,7 @@ type Service struct {
 	repo      Repository
 	executors ExecutorRegistry
 	scheduler Scheduler
+	metrics   Metrics
 }
 
 func NewService(
@@ -50,6 +55,18 @@ func NewService(
 	claimer TaskRunClaimer,
 	repo Repository,
 	executors ExecutorRegistry,
+	scheduler ...Scheduler,
+) *Service {
+	return NewServiceWithMetrics(config, consumer, claimer, repo, executors, nil, scheduler...)
+}
+
+func NewServiceWithMetrics(
+	config ServiceConfig,
+	consumer queue.TaskConsumer,
+	claimer TaskRunClaimer,
+	repo Repository,
+	executors ExecutorRegistry,
+	metrics Metrics,
 	scheduler ...Scheduler,
 ) *Service {
 	var schedulerInstance Scheduler
@@ -64,6 +81,7 @@ func NewService(
 		repo:      repo,
 		executors: executors,
 		scheduler: schedulerInstance,
+		metrics:   metrics,
 	}
 }
 
@@ -116,7 +134,7 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
 			return err
 		}
-		return s.consumer.AckTask(ctx, message.MessageID)
+		return s.ackTask(ctx, message.MessageID)
 	}
 
 	executionInput := ExecutionInput{
@@ -141,12 +159,12 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
 			return err
 		}
-		return s.consumer.AckTask(ctx, message.MessageID)
+		return s.ackTask(ctx, message.MessageID)
 	}
 
 	result, executeErr, heartbeatErr := s.executeWithHeartbeat(ctx, executor, executionInput, message.TaskRunID, heartbeatInterval)
 	if heartbeatErr != nil {
-		return heartbeatErr
+		return s.leavePending(heartbeatErr)
 	}
 
 	completeInput, err := completeAttemptInput(taskAttempt.ID, message.TaskRunID, s.config.WorkerID, result, executeErr)
@@ -157,13 +175,13 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		if err := s.finalizeWorkflowRun(ctx, message.WorkflowRunID); err != nil {
 			return err
 		}
-		return s.consumer.AckTask(ctx, message.MessageID)
+		return s.ackTask(ctx, message.MessageID)
 	}
 	decision := workflow.DecideRetry(time.Now(), taskAttempt.AttemptNumber, policy, result.Retryable, completeInput.FailureReason)
 	completeInput.Retry = decision.Retry
 	completeInput.NextRetryAt = decision.NextRetryAt
 
-	completeResult, err := s.repo.CompleteTaskAttempt(ctx, completeInput)
+	completeResult, err := s.completeTaskAttempt(ctx, completeInput)
 	if err != nil {
 		return err
 	}
@@ -178,7 +196,7 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		}
 	}
 
-	if err := s.consumer.AckTask(ctx, message.MessageID); err != nil {
+	if err := s.ackTask(ctx, message.MessageID); err != nil {
 		return err
 	}
 
@@ -220,10 +238,14 @@ func (s *Service) executeWithHeartbeat(
 					LeaseDuration: s.config.LeaseDuration,
 				})
 				if err != nil {
+					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+						s.incMetric("goflow_worker_lease_heartbeat_failures_total")
+					}
 					cancel()
 					heartbeatDone <- err
 					return
 				}
+				s.incMetric("goflow_worker_lease_heartbeats_total")
 			case <-done:
 				heartbeatDone <- nil
 				return
@@ -261,14 +283,35 @@ func (s *Service) handleUnclaimableTaskRun(ctx context.Context, message queue.Re
 			slog.String("status", string(status)),
 			slog.String("reason", "not_claimable"),
 		)
-		return s.consumer.AckTask(ctx, message.MessageID)
+		return s.ackTask(ctx, message.MessageID)
 	default:
 		return workflow.ErrTaskRunNotClaimable
 	}
 }
 
+func (s *Service) ackTask(ctx context.Context, messageID string) error {
+	if err := s.consumer.AckTask(ctx, messageID); err != nil {
+		return err
+	}
+	s.incMetric("goflow_worker_messages_acknowledged_total")
+	return nil
+}
+
+func (s *Service) leavePending(err error) error {
+	if errors.Is(err, workflow.ErrTaskAttemptNotCompletable) || errors.Is(err, workflow.ErrTaskRunLeaseNotExtensible) {
+		s.incMetric("goflow_worker_messages_left_pending_total")
+	}
+	return err
+}
+
+func (s *Service) incMetric(name string) {
+	if s.metrics != nil {
+		s.metrics.Inc(name)
+	}
+}
+
 func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.TaskAttempt, taskRunID, reason string) (workflow.CompleteTaskAttemptResult, error) {
-	return s.repo.CompleteTaskAttempt(ctx, workflow.CompleteTaskAttemptInput{
+	return s.completeTaskAttempt(ctx, workflow.CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     taskRunID,
 		WorkerID:      s.config.WorkerID,
@@ -277,12 +320,46 @@ func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.Ta
 	})
 }
 
+func (s *Service) completeTaskAttempt(ctx context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error) {
+	result, err := s.repo.CompleteTaskAttempt(ctx, input)
+	if err != nil {
+		if errors.Is(err, workflow.ErrTaskAttemptNotCompletable) {
+			s.incMetric("goflow_worker_late_completions_rejected_total")
+			s.incMetric("goflow_worker_messages_left_pending_total")
+		}
+		return workflow.CompleteTaskAttemptResult{}, err
+	}
+	if s.metrics != nil {
+		switch result.TaskAttempt.Status {
+		case workflow.TaskAttemptStatusCompleted:
+			s.metrics.Inc("goflow_task_attempts_completed_total")
+		case workflow.TaskAttemptStatusFailed:
+			s.metrics.Inc("goflow_task_attempts_failed_total")
+		}
+		switch result.TaskRun.Status {
+		case workflow.TaskRunStatusCompleted:
+			s.metrics.Inc("goflow_task_runs_completed_total")
+		case workflow.TaskRunStatusDeadLetter:
+			s.metrics.Inc("goflow_task_runs_dead_lettered_total")
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) finalizeWorkflowRun(ctx context.Context, workflowRunID string) error {
 	workflowRun, changed, err := s.repo.FinalizeWorkflowRun(ctx, workflowRunID)
 	if err != nil {
 		return err
 	}
 	if changed {
+		if s.metrics != nil {
+			switch workflow.WorkflowRunStatus(workflowRun.Status) {
+			case workflow.WorkflowRunStatusCompleted:
+				s.metrics.Inc("goflow_workflow_runs_completed_total")
+			case workflow.WorkflowRunStatusFailed:
+				s.metrics.Inc("goflow_workflow_runs_failed_total")
+			}
+		}
 		slog.InfoContext(ctx, "workflow_run_finalized",
 			slog.String("workflow_run_id", workflowRun.ID),
 			slog.String("workflow_id", workflowRun.WorkflowID),

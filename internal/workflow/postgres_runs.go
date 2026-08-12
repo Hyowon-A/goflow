@@ -507,6 +507,34 @@ func (r *PostgresRepository) RecoverExpiredRunningTaskRuns(ctx context.Context) 
 	return recovered, nil
 }
 
+func (r *PostgresRepository) CountRunningTaskRuns(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM task_runs
+		WHERE status = $1
+	`, TaskRunStatusRunning).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count running task runs: %w", err)
+	}
+	return count, nil
+}
+
+func (r *PostgresRepository) CountExpiredRunningTaskRuns(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM task_runs
+		WHERE status = $1
+			AND lease_expires_at IS NOT NULL
+			AND lease_expires_at <= now()
+	`, TaskRunStatusRunning).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count expired running task runs: %w", err)
+	}
+	return count, nil
+}
+
 func (r *PostgresRepository) LoadTaskRunExecution(ctx context.Context, input LoadTaskRunExecutionInput) (TaskRunExecution, error) {
 	taskRunID := strings.TrimSpace(input.TaskRunID)
 	workflowID := strings.TrimSpace(input.WorkflowID)

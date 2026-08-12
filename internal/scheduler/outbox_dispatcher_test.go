@@ -1,9 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
@@ -21,7 +24,8 @@ func TestOutboxDispatcherPublishesClaimedEventAndMarksPublished(t *testing.T) {
 		}},
 	}
 	publisher := &fakePublisher{}
-	dispatcher := NewOutboxDispatcher(repo, publisher)
+	metrics := &fakeMetrics{}
+	dispatcher := NewOutboxDispatcherWithMetrics(repo, publisher, metrics)
 
 	if err := dispatcher.DispatchPendingTaskOutboxEvents(context.Background()); err != nil {
 		t.Fatalf("dispatch pending task outbox events: %v", err)
@@ -46,9 +50,17 @@ func TestOutboxDispatcherPublishesClaimedEventAndMarksPublished(t *testing.T) {
 	if len(repo.failures) != 0 {
 		t.Fatalf("expected no failure records, got %#v", repo.failures)
 	}
+	if got := metrics.counts["goflow_outbox_published_total"]; got != 1 {
+		t.Fatalf("expected one published metric, got %d", got)
+	}
 }
 
 func TestOutboxDispatcherRecordsPublishFailure(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
 	publishErr := errors.New("redis unavailable")
 	repo := &fakeOutboxRepository{
 		events: []workflow.TaskOutboxEvent{{
@@ -60,7 +72,8 @@ func TestOutboxDispatcherRecordsPublishFailure(t *testing.T) {
 		}},
 	}
 	publisher := &fakePublisher{err: publishErr}
-	dispatcher := NewOutboxDispatcher(repo, publisher)
+	metrics := &fakeMetrics{}
+	dispatcher := NewOutboxDispatcherWithMetrics(repo, publisher, metrics)
 
 	if err := dispatcher.DispatchPendingTaskOutboxEvents(context.Background()); err != nil {
 		t.Fatalf("dispatch pending task outbox events: %v", err)
@@ -75,6 +88,22 @@ func TestOutboxDispatcherRecordsPublishFailure(t *testing.T) {
 	}
 	if len(repo.published) != 0 {
 		t.Fatalf("expected no published marks, got %#v", repo.published)
+	}
+	if got := metrics.counts["goflow_outbox_publish_failures_total"]; got != 1 {
+		t.Fatalf("expected one publish failure metric, got %d", got)
+	}
+	for _, want := range []string{
+		`"msg":"task_outbox_publish_failed"`,
+		`"outbox_event_id":"event-1"`,
+		`"workflow_id":"workflow"`,
+		`"workflow_run_id":"workflow-run"`,
+		`"task_id":"task"`,
+		`"task_run_id":"task-run"`,
+		`"error":"redis unavailable"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("expected log output to contain %s, got %s", want, logs.String())
+		}
 	}
 }
 

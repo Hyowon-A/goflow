@@ -16,11 +16,20 @@ type Repository interface {
 }
 
 type Service struct {
-	repo Repository
+	repo    Repository
+	metrics metricsCounter
+}
+
+type metricsCounter interface {
+	Inc(string)
 }
 
 func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+	return NewServiceWithMetrics(repo, nil)
+}
+
+func NewServiceWithMetrics(repo Repository, metrics metricsCounter) *Service {
+	return &Service{repo: repo, metrics: metrics}
 }
 
 func (s *Service) CreateWorkflow(ctx context.Context, input CreateWorkflowInput) (Workflow, error) {
@@ -72,7 +81,14 @@ func (s *Service) CreateWorkflowRun(ctx context.Context, workflowID string, inpu
 		return WorkflowRun{}, ErrWorkflowNotFound
 	}
 
-	return s.repo.CreateWorkflowRun(ctx, workflowID, input)
+	workflowRun, err := s.repo.CreateWorkflowRun(ctx, workflowID, input)
+	if err != nil {
+		return WorkflowRun{}, err
+	}
+	if !workflowRun.IdempotencyReused && s.metrics != nil {
+		s.metrics.Inc("goflow_workflow_runs_started_total")
+	}
+	return workflowRun, nil
 }
 
 func (s *Service) GetWorkflowRun(ctx context.Context, workflowID, workflowRunID string) (WorkflowRun, error) {
