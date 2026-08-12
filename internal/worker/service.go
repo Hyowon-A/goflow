@@ -13,7 +13,9 @@ import (
 )
 
 type ServiceConfig struct {
-	WorkerID string
+	WorkerID          string
+	LeaseDuration     time.Duration
+	HeartbeatInterval time.Duration
 }
 
 type TaskRunClaimer interface {
@@ -26,6 +28,7 @@ type Repository interface {
 	CreateTaskAttempt(ctx context.Context, taskRunID string) (workflow.TaskAttempt, error)
 	CompleteTaskAttempt(ctx context.Context, input workflow.CompleteTaskAttemptInput) (workflow.CompleteTaskAttemptResult, error)
 	FinalizeWorkflowRun(ctx context.Context, workflowRunID string) (workflow.WorkflowRun, bool, error)
+	ExtendTaskRunLease(ctx context.Context, input workflow.ExtendTaskRunLeaseInput) (workflow.TaskRun, error)
 }
 
 type Scheduler interface {
@@ -65,7 +68,11 @@ func NewService(
 }
 
 func (s *Service) ProcessOne(ctx context.Context) error {
-	if s == nil || s.consumer == nil || s.claimer == nil || s.repo == nil || s.executors == nil || strings.TrimSpace(s.config.WorkerID) == "" {
+	if s == nil {
+		return fmt.Errorf("invalid worker service config")
+	}
+	heartbeatInterval := s.heartbeatInterval()
+	if s.consumer == nil || s.claimer == nil || s.repo == nil || s.executors == nil || strings.TrimSpace(s.config.WorkerID) == "" || s.config.LeaseDuration <= 0 || heartbeatInterval <= 0 || heartbeatInterval >= s.config.LeaseDuration {
 		return fmt.Errorf("invalid worker service config")
 	}
 
@@ -75,8 +82,9 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 	}
 
 	_, err = s.claimer.ClaimTaskRun(ctx, workflow.ClaimTaskRunInput{
-		TaskRunID: message.TaskRunID,
-		WorkerID:  s.config.WorkerID,
+		TaskRunID:     message.TaskRunID,
+		WorkerID:      s.config.WorkerID,
+		LeaseDuration: s.config.LeaseDuration,
 	})
 	if err != nil {
 		if errors.Is(err, workflow.ErrTaskRunNotClaimable) {
@@ -136,9 +144,12 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 		return s.consumer.AckTask(ctx, message.MessageID)
 	}
 
-	result, executeErr := executor.Execute(ctx, executionInput)
+	result, executeErr, heartbeatErr := s.executeWithHeartbeat(ctx, executor, executionInput, message.TaskRunID, heartbeatInterval)
+	if heartbeatErr != nil {
+		return heartbeatErr
+	}
 
-	completeInput, err := completeAttemptInput(taskAttempt.ID, message.TaskRunID, result, executeErr)
+	completeInput, err := completeAttemptInput(taskAttempt.ID, message.TaskRunID, s.config.WorkerID, result, executeErr)
 	if err != nil {
 		if _, completeErr := s.completeFailedAttempt(ctx, taskAttempt, message.TaskRunID, err.Error()); completeErr != nil {
 			return completeErr
@@ -174,6 +185,64 @@ func (s *Service) ProcessOne(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) heartbeatInterval() time.Duration {
+	if s == nil {
+		return 0
+	}
+	if s.config.HeartbeatInterval > 0 {
+		return s.config.HeartbeatInterval
+	}
+	return s.config.LeaseDuration / 2
+}
+
+func (s *Service) executeWithHeartbeat(
+	ctx context.Context,
+	executor Executor,
+	input ExecutionInput,
+	taskRunID string,
+	interval time.Duration,
+) (ExecutionResult, error, error) {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				_, err := s.repo.ExtendTaskRunLease(ctx, workflow.ExtendTaskRunLeaseInput{
+					TaskRunID:     taskRunID,
+					WorkerID:      s.config.WorkerID,
+					LeaseDuration: s.config.LeaseDuration,
+				})
+				if err != nil {
+					cancel()
+					heartbeatDone <- err
+					return
+				}
+			case <-done:
+				heartbeatDone <- nil
+				return
+			case <-ctx.Done():
+				heartbeatDone <- nil
+				return
+			}
+		}
+	}()
+
+	result, executeErr := executor.Execute(heartbeatCtx, input)
+	close(done)
+	if err := <-heartbeatDone; err != nil {
+		return result, executeErr, err
+	}
+
+	return result, executeErr, nil
+}
+
 func (s *Service) handleUnclaimableTaskRun(ctx context.Context, message queue.ReceivedTaskMessage) error {
 	status, err := s.repo.LoadTaskRunStatus(ctx, workflow.LoadTaskRunStatusInput{TaskRunID: message.TaskRunID})
 	if err != nil {
@@ -202,6 +271,7 @@ func (s *Service) completeFailedAttempt(ctx context.Context, attempt workflow.Ta
 	return s.repo.CompleteTaskAttempt(ctx, workflow.CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     taskRunID,
+		WorkerID:      s.config.WorkerID,
 		Success:       false,
 		FailureReason: reason,
 	})
@@ -225,6 +295,7 @@ func (s *Service) finalizeWorkflowRun(ctx context.Context, workflowRunID string)
 func completeAttemptInput(
 	taskAttemptID string,
 	taskRunID string,
+	workerID string,
 	result ExecutionResult,
 	executeErr error,
 ) (workflow.CompleteTaskAttemptInput, error) {
@@ -232,6 +303,7 @@ func completeAttemptInput(
 		return workflow.CompleteTaskAttemptInput{
 			TaskAttemptID: taskAttemptID,
 			TaskRunID:     taskRunID,
+			WorkerID:      workerID,
 			Success:       false,
 			FailureReason: executeErr.Error(),
 		}, nil
@@ -241,6 +313,7 @@ func completeAttemptInput(
 		return workflow.CompleteTaskAttemptInput{
 			TaskAttemptID: taskAttemptID,
 			TaskRunID:     taskRunID,
+			WorkerID:      workerID,
 			Success:       false,
 			FailureReason: result.FailureReason,
 		}, nil
@@ -249,6 +322,7 @@ func completeAttemptInput(
 	return workflow.CompleteTaskAttemptInput{
 		TaskAttemptID: taskAttemptID,
 		TaskRunID:     taskRunID,
+		WorkerID:      workerID,
 		Success:       true,
 		Output:        result.Output,
 	}, nil

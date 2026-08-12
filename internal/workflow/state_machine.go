@@ -91,6 +91,7 @@ var taskRunStateMachine = stateMachine[TaskRunStatus]{
 			TaskRunStatusRunning: {},
 		},
 		TaskRunStatusRunning: {
+			TaskRunStatusQueued:     {},
 			TaskRunStatusCompleted:  {},
 			TaskRunStatusRetryWait:  {},
 			TaskRunStatusDeadLetter: {},

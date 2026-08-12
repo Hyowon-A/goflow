@@ -62,6 +62,15 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.QueueReadCount != 1 {
 		t.Fatalf("expected default QueueReadCount 1, got %d", cfg.QueueReadCount)
 	}
+	if cfg.WorkerLeaseDuration != 30*time.Second {
+		t.Fatalf("expected default WorkerLeaseDuration 30s, got %s", cfg.WorkerLeaseDuration)
+	}
+	if cfg.WorkerHeartbeatInterval != 10*time.Second {
+		t.Fatalf("expected default WorkerHeartbeatInterval 10s, got %s", cfg.WorkerHeartbeatInterval)
+	}
+	if cfg.WorkerRecoveryInterval != 30*time.Second {
+		t.Fatalf("expected default WorkerRecoveryInterval 30s, got %s", cfg.WorkerRecoveryInterval)
+	}
 
 	if cfg.Address() != ":8080" {
 		t.Fatalf("expected address :8080, got %q", cfg.Address())
@@ -78,6 +87,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("QUEUE_CONSUMER_GROUP", "goflow-test-workers")
 	t.Setenv("QUEUE_BLOCK_TIMEOUT", "250ms")
 	t.Setenv("QUEUE_READ_COUNT", "3")
+	t.Setenv("WORKER_LEASE_DURATION", "45s")
+	t.Setenv("WORKER_HEARTBEAT_INTERVAL", "15s")
+	t.Setenv("WORKER_RECOVERY_INTERVAL", "20s")
 
 	cfg, err := Load()
 	if err != nil {
@@ -119,6 +131,15 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	if cfg.QueueReadCount != 3 {
 		t.Fatalf("expected QueueReadCount 3, got %d", cfg.QueueReadCount)
 	}
+	if cfg.WorkerLeaseDuration != 45*time.Second {
+		t.Fatalf("expected WorkerLeaseDuration 45s, got %s", cfg.WorkerLeaseDuration)
+	}
+	if cfg.WorkerHeartbeatInterval != 15*time.Second {
+		t.Fatalf("expected WorkerHeartbeatInterval 15s, got %s", cfg.WorkerHeartbeatInterval)
+	}
+	if cfg.WorkerRecoveryInterval != 20*time.Second {
+		t.Fatalf("expected WorkerRecoveryInterval 20s, got %s", cfg.WorkerRecoveryInterval)
+	}
 
 	if cfg.Address() != ":9090" {
 		t.Fatalf("expected address :9090, got %q", cfg.Address())
@@ -146,6 +167,21 @@ func TestLoadRejectsInvalidWorkerQueueSettings(t *testing.T) {
 			key:  "QUEUE_READ_COUNT",
 			val:  "not-a-number",
 		},
+		{
+			name: "invalid lease duration",
+			key:  "WORKER_LEASE_DURATION",
+			val:  "not-a-duration",
+		},
+		{
+			name: "invalid heartbeat interval",
+			key:  "WORKER_HEARTBEAT_INTERVAL",
+			val:  "not-a-duration",
+		},
+		{
+			name: "invalid recovery interval",
+			key:  "WORKER_RECOVERY_INTERVAL",
+			val:  "not-a-duration",
+		},
 	}
 
 	for _, tt := range tests {
@@ -156,6 +192,32 @@ func TestLoadRejectsInvalidWorkerQueueSettings(t *testing.T) {
 			_, err := Load()
 			if err == nil {
 				t.Fatal("expected invalid worker queue setting to return an error")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsHeartbeatIntervalGreaterThanOrEqualToLeaseDuration(t *testing.T) {
+	tests := []struct {
+		name      string
+		heartbeat string
+	}{
+		{name: "equal to lease", heartbeat: "30s"},
+		{name: "greater than lease", heartbeat: "31s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/goflow?sslmode=disable")
+			t.Setenv("WORKER_LEASE_DURATION", "30s")
+			t.Setenv("WORKER_HEARTBEAT_INTERVAL", tt.heartbeat)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("expected heartbeat interval validation error")
+			}
+			if !strings.Contains(err.Error(), "WORKER_HEARTBEAT_INTERVAL must be shorter than WORKER_LEASE_DURATION") {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

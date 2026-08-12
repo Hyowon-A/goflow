@@ -44,7 +44,7 @@ func TestExecutionServiceIntegrationCompletesSuccessfulTaskAndAcknowledgesMessag
 		},
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -88,7 +88,7 @@ func TestExecutionServiceIntegrationLastTaskCompletionFinalizesWorkflowCompleted
 	repo := workflow.NewPostgresRepository(pool)
 	consumer := &fakeConsumer{received: workerServiceMessage(fixture, "redis-message-id")}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -126,7 +126,7 @@ func TestExecutionServiceIntegrationFailsTaskAndAcknowledgesMessage(t *testing.T
 		},
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -167,7 +167,7 @@ func TestExecutionServiceIntegrationDeadLetterFinalizesWorkflowFailed(t *testing
 	repo := workflow.NewPostgresRepository(pool)
 	consumer := &fakeConsumer{received: workerServiceMessage(fixture, "redis-message-id")}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -196,7 +196,7 @@ func TestExecutionServiceIntegrationOneBranchCompletionLeavesWorkflowRunning(t *
 	repo := workflow.NewPostgresRepository(pool)
 	consumer := &fakeConsumer{received: workerServiceMessage(fixture, "redis-message-id")}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -235,7 +235,7 @@ func TestExecutionServiceIntegrationRunsQueuedRetryAsSecondAttempt(t *testing.T)
 		},
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -284,7 +284,7 @@ func TestExecutionServiceIntegrationExhaustedRetryDeadLettersTaskRun(t *testing.
 		received: workerServiceMessage(fixture, "redis-message-id"),
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -326,7 +326,7 @@ func TestExecutionServiceIntegrationUnknownExecutorFailureIsPermanentEvenWithRet
 		received: workerServiceMessage(fixture, "redis-message-id"),
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,
@@ -360,7 +360,7 @@ func TestExecutionServiceIntegrationInvalidRetryPolicyFailsWithoutRetryLoop(t *t
 		received: workerServiceMessage(fixture, "redis-message-id"),
 	}
 	service := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		consumer,
 		repo,
 		repo,

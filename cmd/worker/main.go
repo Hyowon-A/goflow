@@ -70,6 +70,7 @@ func run() error {
 	}
 	defer publisher.Close()
 	outboxDispatcher := scheduler.NewOutboxDispatcher(repo, publisher)
+	schedulerService := scheduler.NewService(repo, publisher)
 
 	executors := worker.NewExecutorRegistry(map[string]worker.Executor{
 		worker.ExecutorTypeSleep:      worker.SleepExecutor{},
@@ -77,18 +78,29 @@ func run() error {
 		worker.ExecutorTypeRandomFail: worker.NewRandomFailExecutor(nil),
 	})
 	service := worker.NewService(
-		worker.ServiceConfig{WorkerID: cfg.WorkerID},
+		worker.ServiceConfig{
+			WorkerID:          cfg.WorkerID,
+			LeaseDuration:     cfg.WorkerLeaseDuration,
+			HeartbeatInterval: cfg.WorkerHeartbeatInterval,
+		},
 		redisConsumer,
 		repo,
 		repo,
 		executors,
-		scheduler.NewService(repo, publisher),
+		schedulerService,
 	)
 	outboxTicker := time.NewTicker(cfg.QueueBlockTimeout)
 	defer outboxTicker.Stop()
+	recoveryTicker := time.NewTicker(cfg.WorkerRecoveryInterval)
+	defer recoveryTicker.Stop()
 	dispatchOutbox := func() {
 		if err := outboxDispatcher.DispatchPendingTaskOutboxEvents(ctx); err != nil {
 			log.Printf("task outbox dispatch failed: %v", err)
+		}
+	}
+	recoverExpiredTaskRuns := func() {
+		if err := schedulerService.RecoverExpiredRunningTaskRuns(ctx); err != nil {
+			log.Printf("recover expired task runs failed: %v", err)
 		}
 	}
 
@@ -103,6 +115,8 @@ func run() error {
 		select {
 		case <-outboxTicker.C:
 			dispatchOutbox()
+		case <-recoveryTicker.C:
+			recoverExpiredTaskRuns()
 		default:
 		}
 

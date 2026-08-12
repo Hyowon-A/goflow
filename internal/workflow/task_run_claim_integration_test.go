@@ -19,6 +19,7 @@ const (
 	workflowClaimMigrationPath          = "../../migrations/001_initial_schema.up.sql"
 	workflowClaimIdempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
 	workflowClaimOutboxPath             = "../../migrations/003_task_outbox_events.up.sql"
+	workflowClaimLeasePath              = "../../migrations/004_task_run_lease.up.sql"
 )
 
 var (
@@ -88,6 +89,10 @@ func setupWorkflowClaimTestDatabase(ctx context.Context) (*pgxpool.Pool, error) 
 		return nil, err
 	}
 	if err := ensureWorkflowClaimOutboxSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	if err := ensureWorkflowClaimLeaseSchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -182,14 +187,37 @@ func ensureWorkflowClaimOutboxClaimSchema(ctx context.Context, pool *pgxpool.Poo
 	return err
 }
 
+func ensureWorkflowClaimLeaseSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var columnExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+				AND table_name = 'task_runs'
+				AND column_name = 'lease_expires_at'
+		)
+	`).Scan(&columnExists)
+	if err != nil || columnExists {
+		return err
+	}
+
+	migrationSQL, err := os.ReadFile(workflowClaimLeasePath)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, string(migrationSQL))
+	return err
+}
+
 func TestPostgresRepositoryClaimTaskRunMovesQueuedTaskRunToRunning(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
 	repo := NewPostgresRepository(pool)
 
 	claimed, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
-		TaskRunID: fixture.taskRunID,
-		WorkerID:  "worker-1",
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("claim task run: %v", err)
@@ -202,12 +230,67 @@ func TestPostgresRepositoryClaimTaskRunMovesQueuedTaskRunToRunning(t *testing.T)
 		t.Fatalf("expected claimed status running, got %q", claimed.Status)
 	}
 
-	status, started := taskRunStatusAndStartedAt(t, pool, fixture.taskRunID)
-	if status != TaskRunStatusRunning {
-		t.Fatalf("expected persisted status running, got %q", status)
+	state := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+	if state.status != TaskRunStatusRunning {
+		t.Fatalf("expected persisted status running, got %q", state.status)
 	}
-	if started == nil {
+	if state.startedAt == nil {
 		t.Fatal("expected started_at to be set when task run is claimed")
+	}
+	if state.lockedBy == nil || *state.lockedBy != "worker-1" {
+		t.Fatalf("expected locked_by worker-1, got %#v", state.lockedBy)
+	}
+	if state.leaseExpiresAt == nil {
+		t.Fatal("expected lease_expires_at to be set")
+	}
+	if state.lastHeartbeatAt == nil {
+		t.Fatal("expected last_heartbeat_at to be set")
+	}
+	if !state.leaseExpiresAt.After(*state.lastHeartbeatAt) {
+		t.Fatalf("expected lease_expires_at after heartbeat, got lease=%s heartbeat=%s", state.leaseExpiresAt, state.lastHeartbeatAt)
+	}
+}
+
+func TestPostgresRepositoryClaimTaskRunRejectsBlankWorkerID(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	repo := NewPostgresRepository(pool)
+
+	_, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      " ",
+		LeaseDuration: 30 * time.Second,
+	})
+	if !errors.Is(err, ErrTaskRunNotClaimable) {
+		t.Fatalf("expected ErrTaskRunNotClaimable, got %v", err)
+	}
+
+	state := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+	if state.status != TaskRunStatusQueued {
+		t.Fatalf("expected status to remain queued, got %q", state.status)
+	}
+	if state.lockedBy != nil || state.leaseExpiresAt != nil || state.lastHeartbeatAt != nil {
+		t.Fatalf("expected lease fields to stay empty, got locked_by=%#v lease=%v heartbeat=%v", state.lockedBy, state.leaseExpiresAt, state.lastHeartbeatAt)
+	}
+}
+
+func TestPostgresRepositoryClaimTaskRunRejectsInvalidLeaseDuration(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	repo := NewPostgresRepository(pool)
+
+	_, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 0,
+	})
+	if !errors.Is(err, ErrTaskRunNotClaimable) {
+		t.Fatalf("expected ErrTaskRunNotClaimable, got %v", err)
+	}
+
+	state := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+	if state.status != TaskRunStatusQueued {
+		t.Fatalf("expected status to remain queued, got %q", state.status)
 	}
 }
 
@@ -228,16 +311,17 @@ func TestPostgresRepositoryClaimTaskRunRejectsNonQueuedTaskRuns(t *testing.T) {
 			fixture := seedTaskRunForClaim(t, pool, status)
 
 			_, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
-				TaskRunID: fixture.taskRunID,
-				WorkerID:  "worker-1",
+				TaskRunID:     fixture.taskRunID,
+				WorkerID:      "worker-1",
+				LeaseDuration: 30 * time.Second,
 			})
 			if !errors.Is(err, ErrTaskRunNotClaimable) {
 				t.Fatalf("expected ErrTaskRunNotClaimable, got %v", err)
 			}
 
-			gotStatus, _ := taskRunStatusAndStartedAt(t, pool, fixture.taskRunID)
-			if gotStatus != status {
-				t.Fatalf("expected status to remain %q, got %q", status, gotStatus)
+			state := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+			if state.status != status {
+				t.Fatalf("expected status to remain %q, got %q", status, state.status)
 			}
 		})
 	}
@@ -248,8 +332,9 @@ func TestPostgresRepositoryClaimTaskRunRejectsMissingTaskRun(t *testing.T) {
 	repo := NewPostgresRepository(pool)
 
 	_, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
-		TaskRunID: uuid.NewString(),
-		WorkerID:  "worker-1",
+		TaskRunID:     uuid.NewString(),
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
 	})
 	if !errors.Is(err, ErrTaskRunNotClaimable) {
 		t.Fatalf("expected ErrTaskRunNotClaimable, got %v", err)
@@ -295,8 +380,9 @@ func TestPostgresRepositoryClaimTaskRunAllowsOnlyOneConcurrentClaim(t *testing.T
 		go func(workerNumber int) {
 			defer wg.Done()
 			_, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
-				TaskRunID: fixture.taskRunID,
-				WorkerID:  fmt.Sprintf("worker-%d", workerNumber),
+				TaskRunID:     fixture.taskRunID,
+				WorkerID:      fmt.Sprintf("worker-%d", workerNumber),
+				LeaseDuration: 30 * time.Second,
 			})
 			errs <- err
 		}(i + 1)
@@ -319,6 +405,140 @@ func TestPostgresRepositoryClaimTaskRunAllowsOnlyOneConcurrentClaim(t *testing.T
 
 	if successes != 1 || notClaimable != 1 {
 		t.Fatalf("expected one successful claim and one not-claimable result, got successes=%d not_claimable=%d", successes, notClaimable)
+	}
+}
+
+func TestPostgresRepositoryExtendTaskRunLeaseUpdatesOwnerRunningTaskRun(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	repo := NewPostgresRepository(pool)
+
+	claimed, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("claim task run: %v", err)
+	}
+	before := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+
+	extended, err := repo.ExtendTaskRunLease(context.Background(), ExtendTaskRunLeaseInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("extend task run lease: %v", err)
+	}
+
+	if extended.ID != claimed.ID {
+		t.Fatalf("expected extended task run ID %q, got %q", claimed.ID, extended.ID)
+	}
+	if extended.Status != TaskRunStatusRunning {
+		t.Fatalf("expected extended task run status running, got %q", extended.Status)
+	}
+	if !extended.LeaseExpiresAt.After(claimed.LeaseExpiresAt) {
+		t.Fatalf("expected extended lease after claimed lease, got claimed=%s extended=%s", claimed.LeaseExpiresAt, extended.LeaseExpiresAt)
+	}
+
+	after := loadTaskRunClaimState(t, pool, fixture.taskRunID)
+	if after.status != TaskRunStatusRunning {
+		t.Fatalf("expected persisted status running, got %q", after.status)
+	}
+	if after.lockedBy == nil || *after.lockedBy != "worker-1" {
+		t.Fatalf("expected locked_by worker-1, got %#v", after.lockedBy)
+	}
+	if after.leaseExpiresAt == nil || !after.leaseExpiresAt.After(*before.leaseExpiresAt) {
+		t.Fatalf("expected persisted lease to extend after %v, got %v", before.leaseExpiresAt, after.leaseExpiresAt)
+	}
+	if after.lastHeartbeatAt == nil || before.lastHeartbeatAt == nil || after.lastHeartbeatAt.Before(*before.lastHeartbeatAt) {
+		t.Fatalf("expected heartbeat to move forward from %v, got %v", before.lastHeartbeatAt, after.lastHeartbeatAt)
+	}
+}
+
+func TestPostgresRepositoryExtendTaskRunLeaseRejectsDifferentWorker(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	repo := NewPostgresRepository(pool)
+
+	if _, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
+	}); err != nil {
+		t.Fatalf("claim task run: %v", err)
+	}
+
+	_, err := repo.ExtendTaskRunLease(context.Background(), ExtendTaskRunLeaseInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-2",
+		LeaseDuration: 30 * time.Second,
+	})
+	if !errors.Is(err, ErrTaskRunLeaseNotExtensible) {
+		t.Fatalf("expected ErrTaskRunLeaseNotExtensible, got %v", err)
+	}
+}
+
+func TestPostgresRepositoryExtendTaskRunLeaseRejectsCompletedTaskRun(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedTaskRunForClaim(t, pool, TaskRunStatusQueued)
+	repo := NewPostgresRepository(pool)
+
+	if _, err := repo.ClaimTaskRun(context.Background(), ClaimTaskRunInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
+	}); err != nil {
+		t.Fatalf("claim task run: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE task_runs
+		SET status = $2
+		WHERE id = $1
+	`, fixture.taskRunID, TaskRunStatusCompleted); err != nil {
+		t.Fatalf("mark task run completed: %v", err)
+	}
+
+	_, err := repo.ExtendTaskRunLease(context.Background(), ExtendTaskRunLeaseInput{
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		LeaseDuration: 30 * time.Second,
+	})
+	if !errors.Is(err, ErrTaskRunLeaseNotExtensible) {
+		t.Fatalf("expected ErrTaskRunLeaseNotExtensible, got %v", err)
+	}
+}
+
+func TestPostgresRepositoryExtendTaskRunLeaseRejectsInvalidInput(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	repo := NewPostgresRepository(pool)
+
+	tests := []struct {
+		name  string
+		input ExtendTaskRunLeaseInput
+	}{
+		{
+			name:  "blank task run id",
+			input: ExtendTaskRunLeaseInput{TaskRunID: " ", WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
+		},
+		{
+			name:  "blank worker id",
+			input: ExtendTaskRunLeaseInput{TaskRunID: uuid.NewString(), WorkerID: " ", LeaseDuration: 30 * time.Second},
+		},
+		{
+			name:  "zero lease duration",
+			input: ExtendTaskRunLeaseInput{TaskRunID: uuid.NewString(), WorkerID: "worker-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := repo.ExtendTaskRunLease(context.Background(), tt.input)
+			if !errors.Is(err, ErrTaskRunLeaseNotExtensible) {
+				t.Fatalf("expected ErrTaskRunLeaseNotExtensible, got %v", err)
+			}
+		})
 	}
 }
 
@@ -367,8 +587,21 @@ func seedTaskRunForClaim(t *testing.T, pool *pgxpool.Pool, status TaskRunStatus)
 	if err != nil {
 		t.Fatalf("insert task run: %v", err)
 	}
+	if status == TaskRunStatusRunning {
+		_, err = pool.Exec(ctx, `
+			UPDATE task_runs
+			SET locked_by = $2,
+				lease_expires_at = now() + interval '1 hour',
+				last_heartbeat_at = now()
+			WHERE id = $1
+		`, fixture.taskRunID, "worker-1")
+		if err != nil {
+			t.Fatalf("set running task run lease: %v", err)
+		}
+	}
 
 	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM task_outbox_events WHERE workflow_id IN (SELECT id FROM workflows WHERE name = $1)`, fixture.workflowName)
 		_, _ = pool.Exec(ctx, `
 			WITH target_workflows AS (
 				SELECT id FROM workflows WHERE name = $1
@@ -404,4 +637,28 @@ func taskRunStatusAndStartedAt(t *testing.T, pool *pgxpool.Pool, taskRunID strin
 	}
 
 	return status, startedAt
+}
+
+type taskRunClaimState struct {
+	status          TaskRunStatus
+	startedAt       *time.Time
+	lockedBy        *string
+	leaseExpiresAt  *time.Time
+	lastHeartbeatAt *time.Time
+}
+
+func loadTaskRunClaimState(t *testing.T, pool *pgxpool.Pool, taskRunID string) taskRunClaimState {
+	t.Helper()
+
+	var state taskRunClaimState
+	err := pool.QueryRow(context.Background(), `
+		SELECT status, started_at, locked_by, lease_expires_at, last_heartbeat_at
+		FROM task_runs
+		WHERE id = $1
+	`, taskRunID).Scan(&state.status, &state.startedAt, &state.lockedBy, &state.leaseExpiresAt, &state.lastHeartbeatAt)
+	if err != nil {
+		t.Fatalf("load task run claim state: %v", err)
+	}
+
+	return state
 }

@@ -25,6 +25,7 @@ func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptAndTaskRunCompleted(t 
 	result, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: " " + attempt.ID + " ",
 		TaskRunID:     " " + fixture.taskRunID + " ",
+		WorkerID:      "worker-1",
 		Success:       true,
 		Output:        output,
 	})
@@ -73,6 +74,7 @@ func TestPostgresRepositoryCompleteTaskAttemptMarksAttemptFailedAndTaskRunDeadLe
 	result, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: " random failure ",
 	})
@@ -113,6 +115,7 @@ func TestPostgresRepositoryCompleteTaskAttemptMovesRetryableFailureToRetryWait(t
 	result, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: " temporary failure ",
 		Retry:         true,
@@ -172,6 +175,7 @@ func TestPostgresRepositoryCompleteTaskAttemptClearsNextRetryAtOnSuccess(t *test
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       true,
 		Output:        map[string]any{"message": "done"},
 	})
@@ -197,6 +201,7 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsInvalidTransition(t *testin
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       true,
 	})
 	if err != nil {
@@ -206,10 +211,11 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsInvalidTransition(t *testin
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       true,
 	})
-	if !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
 	}
 }
 
@@ -226,6 +232,7 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsLateFailureAfterSuccessWith
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       true,
 		Output:        output,
 	})
@@ -236,11 +243,12 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsLateFailureAfterSuccessWith
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: "late failure",
 	})
-	if !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
 	}
 
 	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
@@ -267,6 +275,7 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsLateSuccessAfterFailureWith
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: "first failure",
 	})
@@ -277,11 +286,12 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsLateSuccessAfterFailureWith
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       true,
 		Output:        map[string]any{"message": "late success"},
 	})
-	if !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
 	}
 
 	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
@@ -308,6 +318,7 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsFailureReplayWithoutDuplica
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: "first failure",
 	})
@@ -318,16 +329,76 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsFailureReplayWithoutDuplica
 	_, err = repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: attempt.ID,
 		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: "second failure",
 	})
-	if !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
 	}
 
 	persisted := loadCompletedAttemptState(t, pool, attempt.ID, fixture.taskRunID)
 	if persisted.failureReason == nil || *persisted.failureReason != "first failure" {
 		t.Fatalf("expected failure reason to stay first failure, got %#v", persisted.failureReason)
+	}
+	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
+}
+
+func TestPostgresRepositoryCompleteTaskAttemptRejectsLateSuccessAfterLeaseRecovery(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedLeasedRunningTaskRun(t, pool, 1, 2, time.Now().Add(-time.Minute))
+	repo := NewPostgresRepository(pool)
+
+	if _, err := repo.RecoverExpiredRunningTaskRuns(context.Background()); err != nil {
+		t.Fatalf("recover expired task run: %v", err)
+	}
+
+	_, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: fixture.attemptID,
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		Success:       true,
+		Output:        map[string]any{"message": "late success"},
+	})
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
+	}
+
+	persisted := loadCompletedAttemptState(t, pool, fixture.attemptID, fixture.taskRunID)
+	if persisted.taskRunStatus != TaskRunStatusQueued {
+		t.Fatalf("expected task run to stay queued, got %q", persisted.taskRunStatus)
+	}
+	if persisted.failureReason == nil || *persisted.failureReason != "lease_expired" {
+		t.Fatalf("expected lease_expired failure reason, got %#v", persisted.failureReason)
+	}
+	if persisted.output != nil {
+		t.Fatalf("expected output to stay empty, got %#v", persisted.output)
+	}
+}
+
+func TestPostgresRepositoryCompleteTaskAttemptRejectsLateFailureAfterLeaseRecoveryWithoutDuplicatingAttempts(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedLeasedRunningTaskRun(t, pool, 1, 2, time.Now().Add(-time.Minute))
+	repo := NewPostgresRepository(pool)
+
+	if _, err := repo.RecoverExpiredRunningTaskRuns(context.Background()); err != nil {
+		t.Fatalf("recover expired task run: %v", err)
+	}
+
+	_, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
+		TaskAttemptID: fixture.attemptID,
+		TaskRunID:     fixture.taskRunID,
+		WorkerID:      "worker-1",
+		Success:       false,
+		FailureReason: "late failure",
+	})
+	if !errors.Is(err, ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
+	}
+
+	persisted := loadCompletedAttemptState(t, pool, fixture.attemptID, fixture.taskRunID)
+	if persisted.failureReason == nil || *persisted.failureReason != "lease_expired" {
+		t.Fatalf("expected failure reason to stay lease_expired, got %#v", persisted.failureReason)
 	}
 	assertTaskRunAttemptCount(t, pool, fixture.taskRunID, 1)
 }
@@ -339,6 +410,7 @@ func TestPostgresRepositoryCompleteTaskAttemptRejectsMissingAttempt(t *testing.T
 	_, err := repo.CompleteTaskAttempt(context.Background(), CompleteTaskAttemptInput{
 		TaskAttemptID: uuid.NewString(),
 		TaskRunID:     uuid.NewString(),
+		WorkerID:      "worker-1",
 		Success:       true,
 	})
 	if !errors.Is(err, ErrTaskAttemptNotFound) {

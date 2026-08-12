@@ -14,15 +14,18 @@ import (
 var defaultWorkerID = fmt.Sprintf("worker-%s", uuid.NewString())
 
 type Config struct {
-	AppEnv             string
-	HTTPPort           string
-	DatabaseURL        string
-	RedisAddr          string
-	QueueStreamName    string
-	WorkerID           string
-	QueueConsumerGroup string
-	QueueBlockTimeout  time.Duration
-	QueueReadCount     int
+	AppEnv                  string
+	HTTPPort                string
+	DatabaseURL             string
+	RedisAddr               string
+	QueueStreamName         string
+	WorkerID                string
+	QueueConsumerGroup      string
+	QueueBlockTimeout       time.Duration
+	QueueReadCount          int
+	WorkerLeaseDuration     time.Duration
+	WorkerHeartbeatInterval time.Duration
+	WorkerRecoveryInterval  time.Duration
 }
 
 func Load() (Config, error) {
@@ -35,17 +38,35 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	workerLeaseDuration, err := getDurationEnv("WORKER_LEASE_DURATION", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerHeartbeatInterval, err := getDurationEnv("WORKER_HEARTBEAT_INTERVAL", 10*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerRecoveryInterval, err := getDurationEnv("WORKER_RECOVERY_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if workerHeartbeatInterval >= workerLeaseDuration {
+		return Config{}, errors.New("WORKER_HEARTBEAT_INTERVAL must be shorter than WORKER_LEASE_DURATION")
+	}
 
 	cfg := Config{
-		AppEnv:             getEnv("APP_ENV", "development"),
-		HTTPPort:           getEnv("HTTP_PORT", "8080"),
-		DatabaseURL:        os.Getenv("DATABASE_URL"), // returns an empty string when the variable is missing
-		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6379"),
-		QueueStreamName:    getEnv("QUEUE_STREAM_NAME", "goflow:tasks"),
-		WorkerID:           getEnv("WORKER_ID", defaultWorkerID),
-		QueueConsumerGroup: getEnv("QUEUE_CONSUMER_GROUP", "goflow-workers"),
-		QueueBlockTimeout:  queueBlockTimeout,
-		QueueReadCount:     queueReadCount,
+		AppEnv:                  getEnv("APP_ENV", "development"),
+		HTTPPort:                getEnv("HTTP_PORT", "8080"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"), // returns an empty string when the variable is missing
+		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6379"),
+		QueueStreamName:         getEnv("QUEUE_STREAM_NAME", "goflow:tasks"),
+		WorkerID:                getEnv("WORKER_ID", defaultWorkerID),
+		QueueConsumerGroup:      getEnv("QUEUE_CONSUMER_GROUP", "goflow-workers"),
+		QueueBlockTimeout:       queueBlockTimeout,
+		QueueReadCount:          queueReadCount,
+		WorkerLeaseDuration:     workerLeaseDuration,
+		WorkerHeartbeatInterval: workerHeartbeatInterval,
+		WorkerRecoveryInterval:  workerRecoveryInterval,
 	}
 
 	if cfg.DatabaseURL == "" {

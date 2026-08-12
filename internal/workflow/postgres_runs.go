@@ -306,10 +306,12 @@ func (r *PostgresRepository) LoadTaskRunStatus(ctx context.Context, input LoadTa
 
 func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRunInput) (TaskRun, error) {
 	taskRunID := strings.TrimSpace(input.TaskRunID)
+	workerID := strings.TrimSpace(input.WorkerID)
 
-	if taskRunID == "" || strings.TrimSpace(input.WorkerID) == "" {
+	if taskRunID == "" || workerID == "" || input.LeaseDuration <= 0 {
 		return TaskRun{}, ErrTaskRunNotClaimable
 	}
+
 	if err := ValidateTaskRunTransition(TaskRunStatusQueued, TaskRunStatusRunning); err != nil {
 		return TaskRun{}, err
 	}
@@ -318,16 +320,20 @@ func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRu
 	err := r.db.QueryRow(ctx, `
 		UPDATE task_runs
 		SET status = $2,
-			started_at = COALESCE(started_at, now())
+			started_at = COALESCE(started_at, now()),
+			locked_by = $4,
+			lease_expires_at = now() + $5,
+			last_heartbeat_at = now()
 		WHERE id = $1
 			AND status = $3
-		RETURNING id, workflow_id, workflow_run_id, task_id, status
-	`, taskRunID, TaskRunStatusRunning, TaskRunStatusQueued).Scan(
+		RETURNING id, workflow_id, workflow_run_id, task_id, status, lease_expires_at
+	`, taskRunID, TaskRunStatusRunning, TaskRunStatusQueued, workerID, input.LeaseDuration).Scan(
 		&taskRun.ID,
 		&taskRun.WorkflowID,
 		&taskRun.WorkflowRunID,
 		&taskRun.TaskID,
 		&taskRun.Status,
+		&taskRun.LeaseExpiresAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -337,6 +343,168 @@ func (r *PostgresRepository) ClaimTaskRun(ctx context.Context, input ClaimTaskRu
 	}
 
 	return taskRun, nil
+}
+
+func (r *PostgresRepository) ExtendTaskRunLease(ctx context.Context, input ExtendTaskRunLeaseInput) (TaskRun, error) {
+	taskRunID := strings.TrimSpace(input.TaskRunID)
+	workerID := strings.TrimSpace(input.WorkerID)
+
+	if taskRunID == "" || workerID == "" || input.LeaseDuration <= 0 {
+		return TaskRun{}, ErrTaskRunLeaseNotExtensible
+	}
+
+	var taskRun TaskRun
+	err := r.db.QueryRow(ctx, `
+		UPDATE task_runs
+		SET lease_expires_at = now() + $4,
+			last_heartbeat_at = now()
+		WHERE id = $1
+			AND status = $2
+			AND locked_by = $3
+			AND lease_expires_at > now()
+		RETURNING id, workflow_id, workflow_run_id, task_id, status, lease_expires_at
+	`, taskRunID, TaskRunStatusRunning, workerID, input.LeaseDuration).Scan(
+		&taskRun.ID,
+		&taskRun.WorkflowID,
+		&taskRun.WorkflowRunID,
+		&taskRun.TaskID,
+		&taskRun.Status,
+		&taskRun.LeaseExpiresAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TaskRun{}, ErrTaskRunLeaseNotExtensible
+		}
+		return TaskRun{}, fmt.Errorf("extend task run lease: %w", err)
+	}
+
+	return taskRun, nil
+}
+
+func (r *PostgresRepository) RecoverExpiredRunningTaskRuns(ctx context.Context) ([]TaskRun, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin recover expired task runs: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
+		SELECT tr.id,
+			tr.workflow_id,
+			tr.workflow_run_id,
+			tr.task_id,
+			COALESCE(tr.locked_by, ''),
+			tr.attempt_count,
+			COALESCE((t.config->'retry'->>'max_attempts')::int, 1) AS max_attempts
+		FROM task_runs tr
+		JOIN tasks t
+			ON t.workflow_id = tr.workflow_id
+			AND t.id = tr.task_id
+		WHERE tr.status = $1
+			AND tr.lease_expires_at IS NOT NULL
+			AND tr.lease_expires_at <= now()
+		ORDER BY tr.lease_expires_at, tr.id
+		FOR UPDATE OF tr SKIP LOCKED
+	`, TaskRunStatusRunning)
+	if err != nil {
+		return nil, fmt.Errorf("find expired task runs: %w", err)
+	}
+
+	type expiredTaskRun struct {
+		TaskRun
+		attemptCount int
+		maxAttempts  int
+	}
+	var expired []expiredTaskRun
+	for rows.Next() {
+		var taskRun expiredTaskRun
+		if err := rows.Scan(
+			&taskRun.ID,
+			&taskRun.WorkflowID,
+			&taskRun.WorkflowRunID,
+			&taskRun.TaskID,
+			&taskRun.LockedBy,
+			&taskRun.attemptCount,
+			&taskRun.maxAttempts,
+		); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan expired task run: %w", err)
+		}
+		expired = append(expired, taskRun)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate expired task runs: %w", err)
+	}
+	rows.Close()
+
+	recovered := make([]TaskRun, 0, len(expired))
+	for _, taskRun := range expired {
+		nextStatus := TaskRunStatusDeadLetter
+		completedAt := any(time.Now())
+		if taskRun.attemptCount < taskRun.maxAttempts {
+			nextStatus = TaskRunStatusQueued
+			completedAt = nil
+		}
+		if err := ValidateTaskRunTransition(TaskRunStatusRunning, nextStatus); err != nil {
+			return nil, err
+		}
+
+		_, err := tx.Exec(ctx, `
+			UPDATE task_attempts
+			SET status = $2,
+				completed_at = now(),
+				failure_reason = $3
+			WHERE task_run_id = $1
+				AND status = $4
+		`, taskRun.ID, TaskAttemptStatusFailed, "lease_expired", TaskAttemptStatusRunning)
+		if err != nil {
+			return nil, fmt.Errorf("fail expired task attempt: %w", err)
+		}
+
+		var recoveredTaskRun TaskRun
+		err = tx.QueryRow(ctx, `
+			UPDATE task_runs
+			SET status = $2,
+				locked_by = NULL,
+				lease_expires_at = NULL,
+				last_heartbeat_at = NULL,
+				next_retry_at = NULL,
+				completed_at = $3
+			WHERE id = $1
+				AND status = $4
+			RETURNING id, workflow_id, workflow_run_id, task_id, status
+		`, taskRun.ID, nextStatus, completedAt, TaskRunStatusRunning).Scan(
+			&recoveredTaskRun.ID,
+			&recoveredTaskRun.WorkflowID,
+			&recoveredTaskRun.WorkflowRunID,
+			&recoveredTaskRun.TaskID,
+			&recoveredTaskRun.Status,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("recover expired task run: %w", err)
+		}
+		recoveredTaskRun.LockedBy = taskRun.LockedBy
+
+		if nextStatus == TaskRunStatusQueued {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO task_outbox_events (id, workflow_id, workflow_run_id, task_id, task_run_id)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT DO NOTHING
+			`, uuid.NewString(), recoveredTaskRun.WorkflowID, recoveredTaskRun.WorkflowRunID, recoveredTaskRun.TaskID, recoveredTaskRun.ID)
+			if err != nil {
+				return nil, fmt.Errorf("create recovered task outbox event: %w", err)
+			}
+		}
+
+		recovered = append(recovered, recoveredTaskRun)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit recover expired task runs: %w", err)
+	}
+
+	return recovered, nil
 }
 
 func (r *PostgresRepository) LoadTaskRunExecution(ctx context.Context, input LoadTaskRunExecutionInput) (TaskRunExecution, error) {

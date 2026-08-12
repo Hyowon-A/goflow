@@ -166,6 +166,11 @@ func TestValidateTaskRunTransitionAcceptsValidTransitions(t *testing.T) {
 			to:   TaskRunStatusCompleted,
 		},
 		{
+			name: "running to queued",
+			from: TaskRunStatusRunning,
+			to:   TaskRunStatusQueued,
+		},
+		{
 			name: "running to dead letter",
 			from: TaskRunStatusRunning,
 			to:   TaskRunStatusDeadLetter,

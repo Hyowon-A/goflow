@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -22,7 +23,7 @@ func TestServiceProcessOneRunsExecutorCompletesAttemptAndAcknowledgesTask(t *tes
 		t.Fatalf("process one task: %v", err)
 	}
 
-	if !reflect.DeepEqual(fixture.claimer.claims, []workflow.ClaimTaskRunInput{{TaskRunID: "task-run-id", WorkerID: "worker-1"}}) {
+	if !reflect.DeepEqual(fixture.claimer.claims, []workflow.ClaimTaskRunInput{{TaskRunID: "task-run-id", WorkerID: "worker-1", LeaseDuration: 30 * time.Second}}) {
 		t.Fatalf("unexpected claim inputs: got %#v", fixture.claimer.claims)
 	}
 	if !reflect.DeepEqual(fixture.repo.loads, []workflow.LoadTaskRunExecutionInput{{
@@ -47,6 +48,7 @@ func TestServiceProcessOneRunsExecutorCompletesAttemptAndAcknowledgesTask(t *tes
 	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
 		TaskAttemptID: "attempt-id",
 		TaskRunID:     "task-run-id",
+		WorkerID:      "worker-1",
 		Success:       true,
 		Output:        map[string]any{"status": "completed", "message": "ok"},
 	}}) {
@@ -192,6 +194,7 @@ func TestServiceProcessOnePersistsExecutorFailureAndAcknowledgesTask(t *testing.
 	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
 		TaskAttemptID: "attempt-id",
 		TaskRunID:     "task-run-id",
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: "random failure",
 	}}) {
@@ -217,6 +220,7 @@ func TestServiceProcessOnePersistsUnknownExecutorFailureAndAcknowledgesTask(t *t
 	if !reflect.DeepEqual(fixture.repo.completions, []workflow.CompleteTaskAttemptInput{{
 		TaskAttemptID: "attempt-id",
 		TaskRunID:     "task-run-id",
+		WorkerID:      "worker-1",
 		Success:       false,
 		FailureReason: ErrUnknownExecutorType.Error(),
 	}}) {
@@ -239,6 +243,41 @@ func TestServiceProcessOneDoesNotAckWhenCompletionPersistenceFails(t *testing.T)
 	}
 	if len(fixture.consumer.acks) != 0 {
 		t.Fatalf("expected no acknowledgements after completion failure, got %#v", fixture.consumer.acks)
+	}
+}
+
+func TestServiceProcessOneDoesNotAckWhenLateCompletionIsRejected(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.executor.result = ExecutionResult{Output: map[string]any{"status": "completed"}}
+	fixture.repo.completeErr = workflow.ErrTaskAttemptNotCompletable
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, workflow.ErrTaskAttemptNotCompletable) {
+		t.Fatalf("expected ErrTaskAttemptNotCompletable, got %v", err)
+	}
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected no acknowledgements after stale completion, got %#v", fixture.consumer.acks)
+	}
+}
+
+func TestServiceProcessOneDoesNotCompleteOrAckWhenHeartbeatLosesLease(t *testing.T) {
+	fixture := newServiceTestFixture()
+	fixture.service.config.HeartbeatInterval = time.Millisecond
+	fixture.repo.extendErr = workflow.ErrTaskRunLeaseNotExtensible
+	fixture.executor.waitForCancel = true
+
+	err := fixture.service.ProcessOne(context.Background())
+	if !errors.Is(err, workflow.ErrTaskRunLeaseNotExtensible) {
+		t.Fatalf("expected ErrTaskRunLeaseNotExtensible, got %v", err)
+	}
+	if len(fixture.repo.extensions) == 0 {
+		t.Fatal("expected heartbeat lease extension attempt")
+	}
+	if len(fixture.repo.completions) != 0 {
+		t.Fatalf("expected no completion after lost lease, got %#v", fixture.repo.completions)
+	}
+	if len(fixture.consumer.acks) != 0 {
+		t.Fatalf("expected no ack after lost lease, got %#v", fixture.consumer.acks)
 	}
 }
 
@@ -352,7 +391,7 @@ func newServiceTestFixture() serviceTestFixture {
 		repo:     repo,
 		executor: executor,
 		service: NewService(
-			ServiceConfig{WorkerID: "worker-1"},
+			ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 			consumer,
 			claimer,
 			repo,
@@ -410,12 +449,14 @@ type fakeExecutionRepository struct {
 	attempt             workflow.TaskAttempt
 	createErr           error
 	completeErr         error
+	extendErr           error
 	finalizeErr         error
 	finalizeChanged     bool
 	finalizeWorkflowRun workflow.WorkflowRun
 	loads               []workflow.LoadTaskRunExecutionInput
 	createdAttempts     []string
 	completions         []workflow.CompleteTaskAttemptInput
+	extensions          []workflow.ExtendTaskRunLeaseInput
 	finalized           []string
 	events              *[]string
 }
@@ -457,6 +498,18 @@ func (r *fakeExecutionRepository) CompleteTaskAttempt(_ context.Context, input w
 	}, nil
 }
 
+func (r *fakeExecutionRepository) ExtendTaskRunLease(_ context.Context, input workflow.ExtendTaskRunLeaseInput) (workflow.TaskRun, error) {
+	r.extensions = append(r.extensions, input)
+	if r.extendErr != nil {
+		return workflow.TaskRun{}, r.extendErr
+	}
+	return workflow.TaskRun{
+		ID:             input.TaskRunID,
+		Status:         workflow.TaskRunStatusRunning,
+		LeaseExpiresAt: time.Now().Add(input.LeaseDuration),
+	}, nil
+}
+
 func (r *fakeExecutionRepository) FinalizeWorkflowRun(_ context.Context, workflowRunID string) (workflow.WorkflowRun, bool, error) {
 	r.finalized = append(r.finalized, workflowRunID)
 	if r.finalizeErr != nil {
@@ -482,13 +535,18 @@ func completedTaskRunStatus(input workflow.CompleteTaskAttemptInput) workflow.Ta
 }
 
 type fakeExecutionExecutor struct {
-	result ExecutionResult
-	err    error
-	inputs []ExecutionInput
+	result        ExecutionResult
+	err           error
+	inputs        []ExecutionInput
+	waitForCancel bool
 }
 
-func (e *fakeExecutionExecutor) Execute(_ context.Context, input ExecutionInput) (ExecutionResult, error) {
+func (e *fakeExecutionExecutor) Execute(ctx context.Context, input ExecutionInput) (ExecutionResult, error) {
 	e.inputs = append(e.inputs, input)
+	if e.waitForCancel {
+		<-ctx.Done()
+		return ExecutionResult{}, ctx.Err()
+	}
 	return e.result, e.err
 }
 

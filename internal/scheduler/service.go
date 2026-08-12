@@ -15,6 +15,7 @@ type repository interface {
 	ClaimPendingTaskOutboxEvents(ctx context.Context) ([]workflow.TaskOutboxEvent, error)
 	MarkTaskOutboxEventPublished(ctx context.Context, input workflow.MarkTaskOutboxEventPublishedInput) error
 	RecordTaskOutboxEventFailure(ctx context.Context, input workflow.RecordTaskOutboxEventFailureInput) error
+	RecoverExpiredRunningTaskRuns(ctx context.Context) ([]workflow.TaskRun, error)
 }
 
 type Service struct {
@@ -75,5 +76,28 @@ func (s *Service) QueueDueRetryTaskRuns(ctx context.Context, now time.Time) erro
 		)
 	}
 
+	return nil
+}
+
+func (s *Service) RecoverExpiredRunningTaskRuns(ctx context.Context) error {
+	taskRuns, err := s.repo.RecoverExpiredRunningTaskRuns(ctx)
+	if err != nil {
+		return err
+	}
+	if len(taskRuns) == 0 {
+		return nil
+	}
+	for _, taskRun := range taskRuns {
+		slog.InfoContext(ctx, "expired_task_run_recovered",
+			slog.String("task_run_id", taskRun.ID),
+			slog.String("previous_worker_id", taskRun.LockedBy),
+		)
+	}
+
+	if err := s.outboxDispatcher.DispatchPendingTaskOutboxEvents(ctx); err != nil {
+		slog.WarnContext(ctx, "task_outbox_dispatch_failed",
+			slog.String("error", err.Error()),
+		)
+	}
 	return nil
 }

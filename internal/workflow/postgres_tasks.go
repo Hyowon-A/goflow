@@ -134,8 +134,9 @@ func (r *PostgresRepository) CreateTaskAttempt(ctx context.Context, taskRunID st
 func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input CompleteTaskAttemptInput) (CompleteTaskAttemptResult, error) {
 	taskAttemptID := strings.TrimSpace(input.TaskAttemptID)
 	taskRunID := strings.TrimSpace(input.TaskRunID)
-	if taskAttemptID == "" || taskRunID == "" {
-		return CompleteTaskAttemptResult{}, ErrTaskAttemptNotFound
+	workerID := strings.TrimSpace(input.WorkerID)
+	if taskAttemptID == "" || taskRunID == "" || workerID == "" {
+		return CompleteTaskAttemptResult{}, ErrTaskAttemptNotCompletable
 	}
 
 	nextAttemptStatus := TaskAttemptStatusCompleted
@@ -163,20 +164,31 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 
 	var currentAttemptStatus TaskAttemptStatus
 	var currentTaskRunStatus TaskRunStatus
+	var lockedBy string
+	var leaseActive bool
 	err = tx.QueryRow(ctx, `
-		SELECT task_attempts.status, task_runs.status
+		SELECT task_attempts.status,
+			task_runs.status,
+			COALESCE(task_runs.locked_by, ''),
+			COALESCE(task_runs.lease_expires_at > now(), false)
 		FROM task_attempts
 		JOIN task_runs
 			ON task_runs.id = task_attempts.task_run_id
 		WHERE task_attempts.id = $1
 			AND task_attempts.task_run_id = $2
 		FOR UPDATE OF task_attempts, task_runs
-	`, taskAttemptID, taskRunID).Scan(&currentAttemptStatus, &currentTaskRunStatus)
+	`, taskAttemptID, taskRunID).Scan(&currentAttemptStatus, &currentTaskRunStatus, &lockedBy, &leaseActive)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return CompleteTaskAttemptResult{}, ErrTaskAttemptNotFound
 		}
 		return CompleteTaskAttemptResult{}, fmt.Errorf("load running task attempt: %w", err)
+	}
+	if currentAttemptStatus != TaskAttemptStatusRunning ||
+		currentTaskRunStatus != TaskRunStatusRunning ||
+		lockedBy != workerID ||
+		!leaseActive {
+		return CompleteTaskAttemptResult{}, ErrTaskAttemptNotCompletable
 	}
 
 	if err := ValidateTaskAttemptTransition(currentAttemptStatus, nextAttemptStatus); err != nil {
@@ -194,14 +206,18 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 			failure_reason = $4
 		WHERE id = $1
 			AND task_run_id = $2
+			AND status = $5
 		RETURNING id, task_run_id, attempt_number, status
-	`, taskAttemptID, taskRunID, nextAttemptStatus, failureReason).Scan(
+	`, taskAttemptID, taskRunID, nextAttemptStatus, failureReason, TaskAttemptStatusRunning).Scan(
 		&result.TaskAttempt.ID,
 		&result.TaskAttempt.TaskRunID,
 		&result.TaskAttempt.AttemptNumber,
 		&result.TaskAttempt.Status,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CompleteTaskAttemptResult{}, ErrTaskAttemptNotCompletable
+		}
 		return CompleteTaskAttemptResult{}, fmt.Errorf("update task attempt terminal state: %w", err)
 	}
 
@@ -212,8 +228,11 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 			completed_at = CASE WHEN $4 THEN NULL ELSE now() END,
 			next_retry_at = $5
 		WHERE id = $1
+			AND status = $6
+			AND locked_by = $7
+			AND lease_expires_at > now()
 		RETURNING id, workflow_id, workflow_run_id, task_id, status
-	`, taskRunID, nextTaskRunStatus, input.Output, retryWait, nextRetryAt).Scan(
+	`, taskRunID, nextTaskRunStatus, input.Output, retryWait, nextRetryAt, TaskRunStatusRunning, workerID).Scan(
 		&result.TaskRun.ID,
 		&result.TaskRun.WorkflowID,
 		&result.TaskRun.WorkflowRunID,
@@ -221,6 +240,9 @@ func (r *PostgresRepository) CompleteTaskAttempt(ctx context.Context, input Comp
 		&result.TaskRun.Status,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CompleteTaskAttemptResult{}, ErrTaskAttemptNotCompletable
+		}
 		return CompleteTaskAttemptResult{}, fmt.Errorf("update task run terminal state: %w", err)
 	}
 

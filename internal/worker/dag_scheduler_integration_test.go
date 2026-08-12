@@ -21,7 +21,7 @@ func TestSchedulerAndWorkerExecuteFanOutFanInDAG(t *testing.T) {
 	queue := &dagQueue{}
 	scheduler := scheduler.NewService(repo, queue)
 	worker := NewService(
-		ServiceConfig{WorkerID: "worker-1"},
+		ServiceConfig{WorkerID: "worker-1", LeaseDuration: 30 * time.Second},
 		queue,
 		repo,
 		repo,

@@ -49,6 +49,7 @@ type CompleteTaskAttemptInput struct {
 	FailureReason string
 	Retry         bool
 	NextRetryAt   time.Time
+	WorkerID      string
 }
 
 type CompleteTaskAttemptResult struct {
@@ -81,11 +82,13 @@ type WorkflowRun struct {
 }
 
 type TaskRun struct {
-	ID            string
-	WorkflowID    string
-	WorkflowRunID string
-	TaskID        string
-	Status        TaskRunStatus
+	ID             string
+	WorkflowID     string
+	WorkflowRunID  string
+	TaskID         string
+	Status         TaskRunStatus
+	LockedBy       string
+	LeaseExpiresAt time.Time
 }
 
 type LoadTaskRunStatusInput struct {
@@ -93,8 +96,15 @@ type LoadTaskRunStatusInput struct {
 }
 
 type ClaimTaskRunInput struct {
-	TaskRunID string
-	WorkerID  string
+	TaskRunID     string
+	WorkerID      string
+	LeaseDuration time.Duration
+}
+
+type ExtendTaskRunLeaseInput struct {
+	TaskRunID     string
+	WorkerID      string
+	LeaseDuration time.Duration
 }
 
 type LoadTaskRunExecutionInput struct {

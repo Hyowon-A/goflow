@@ -217,21 +217,78 @@ func TestServiceQueueDueRetryTaskRunsReturnsErrors(t *testing.T) {
 	}
 }
 
+func TestServiceRecoverExpiredRunningTaskRunsLogsAndDispatchesOutboxEvents(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	repo := &fakeRepository{
+		recoveredTaskRuns: []workflow.TaskRun{
+			{ID: "task-run-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", LockedBy: "worker-1"},
+		},
+		outboxEvents: []workflow.TaskOutboxEvent{
+			{ID: "event-1", WorkflowID: "workflow", WorkflowRunID: "workflow-run", TaskID: "task-1", TaskRunID: "task-run-1"},
+		},
+	}
+	publisher := &fakePublisher{}
+	service := NewService(repo, publisher)
+
+	if err := service.RecoverExpiredRunningTaskRuns(context.Background()); err != nil {
+		t.Fatalf("recover expired task runs: %v", err)
+	}
+
+	if !reflect.DeepEqual(publisher.messages, []queue.TaskMessage{{
+		WorkflowID:    "workflow",
+		WorkflowRunID: "workflow-run",
+		TaskID:        "task-1",
+		TaskRunID:     "task-run-1",
+	}}) {
+		t.Fatalf("unexpected published messages: got %#v", publisher.messages)
+	}
+	if repo.claims != 1 {
+		t.Fatalf("expected one outbox claim after recovery, got %d", repo.claims)
+	}
+	for _, want := range []string{
+		`"msg":"expired_task_run_recovered"`,
+		`"task_run_id":"task-run-1"`,
+		`"previous_worker_id":"worker-1"`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("expected log output to contain %s, got %s", want, logs.String())
+		}
+	}
+}
+
+func TestServiceRecoverExpiredRunningTaskRunsSkipsOutboxWhenNoRowsChanged(t *testing.T) {
+	repo := &fakeRepository{}
+	service := NewService(repo, &fakePublisher{})
+
+	if err := service.RecoverExpiredRunningTaskRuns(context.Background()); err != nil {
+		t.Fatalf("recover expired task runs: %v", err)
+	}
+	if repo.claims != 0 {
+		t.Fatalf("expected no outbox claim when no rows recovered, got %d", repo.claims)
+	}
+}
+
 type fakeRepository struct {
-	taskRuns       []workflow.TaskRun
-	retryTaskRuns  []workflow.TaskRun
-	batches        [][]workflow.TaskRun
-	retryBatches   [][]workflow.TaskRun
-	outboxEvents   []workflow.TaskOutboxEvent
-	outboxBatches  [][]workflow.TaskOutboxEvent
-	err            error
-	retryErr       error
-	claimErr       error
-	workflowRunIDs []string
-	retryTimes     []time.Time
-	claims         int
-	published      []workflow.MarkTaskOutboxEventPublishedInput
-	failures       []workflow.RecordTaskOutboxEventFailureInput
+	taskRuns          []workflow.TaskRun
+	retryTaskRuns     []workflow.TaskRun
+	recoveredTaskRuns []workflow.TaskRun
+	batches           [][]workflow.TaskRun
+	retryBatches      [][]workflow.TaskRun
+	outboxEvents      []workflow.TaskOutboxEvent
+	outboxBatches     [][]workflow.TaskOutboxEvent
+	err               error
+	retryErr          error
+	recoveryErr       error
+	claimErr          error
+	workflowRunIDs    []string
+	retryTimes        []time.Time
+	claims            int
+	published         []workflow.MarkTaskOutboxEventPublishedInput
+	failures          []workflow.RecordTaskOutboxEventFailureInput
 }
 
 func (r *fakeRepository) QueueRunnableTaskRuns(_ context.Context, workflowRunID string) ([]workflow.TaskRun, error) {
@@ -258,6 +315,13 @@ func (r *fakeRepository) QueueDueRetryTaskRuns(_ context.Context, now time.Time)
 		return taskRuns, nil
 	}
 	return r.retryTaskRuns, nil
+}
+
+func (r *fakeRepository) RecoverExpiredRunningTaskRuns(context.Context) ([]workflow.TaskRun, error) {
+	if r.recoveryErr != nil {
+		return nil, r.recoveryErr
+	}
+	return r.recoveredTaskRuns, nil
 }
 
 func (r *fakeRepository) ClaimPendingTaskOutboxEvents(context.Context) ([]workflow.TaskOutboxEvent, error) {

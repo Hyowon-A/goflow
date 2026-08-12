@@ -770,6 +770,7 @@ func TestWorkflowRunInspectionAPI(t *testing.T) {
 		if _, err := repo.CompleteTaskAttempt(context.Background(), workflow.CompleteTaskAttemptInput{
 			TaskAttemptID: attempt.ID,
 			TaskRunID:     taskRunID,
+			WorkerID:      "worker-1",
 			Success:       true,
 			Output:        map[string]any{"ok": true},
 		}); err != nil {
@@ -805,6 +806,7 @@ func TestWorkflowRunInspectionAPI(t *testing.T) {
 		if _, err := repo.CompleteTaskAttempt(context.Background(), workflow.CompleteTaskAttemptInput{
 			TaskAttemptID: attempt.ID,
 			TaskRunID:     taskRunID,
+			WorkerID:      "worker-1",
 			Success:       false,
 			FailureReason: "permanent failure",
 		}); err != nil {
@@ -1075,7 +1077,14 @@ func apiTaskRunIDByTask(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID 
 func setAPITaskRunStatus(t *testing.T, pool *pgxpool.Pool, taskRunID string, status workflow.TaskRunStatus) {
 	t.Helper()
 
-	if _, err := pool.Exec(context.Background(), `UPDATE task_runs SET status = $2 WHERE id = $1`, taskRunID, status); err != nil {
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE task_runs
+		SET status = $2,
+			locked_by = CASE WHEN $2::task_run_status = 'running'::task_run_status THEN 'worker-1' ELSE locked_by END,
+			lease_expires_at = CASE WHEN $2::task_run_status = 'running'::task_run_status THEN now() + interval '1 hour' ELSE lease_expires_at END,
+			last_heartbeat_at = CASE WHEN $2::task_run_status = 'running'::task_run_status THEN now() ELSE last_heartbeat_at END
+		WHERE id = $1
+	`, taskRunID, status); err != nil {
 		t.Fatalf("set task run status: %v", err)
 	}
 }

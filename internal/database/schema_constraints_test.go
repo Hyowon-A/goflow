@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ const (
 	migrationPath          = "../../migrations/001_initial_schema.up.sql"
 	idempotencyPath        = "../../migrations/002_workflow_run_idempotency.up.sql"
 	outboxPath             = "../../migrations/003_task_outbox_events.up.sql"
+	leasePath              = "../../migrations/004_task_run_lease.up.sql"
 )
 
 const (
@@ -102,6 +104,10 @@ func setupTestDatabase(ctx context.Context) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	if err := ensureOutboxSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	if err := ensureLeaseSchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -192,6 +198,58 @@ func ensureOutboxClaimSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		CREATE UNIQUE INDEX uq_task_outbox_events_unpublished_task_run
 			ON task_outbox_events (task_run_id, event_type)
 			WHERE status <> 'published';
+	`)
+	return err
+}
+
+func ensureLeaseSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	var columnExists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+				AND table_name = 'task_runs'
+				AND column_name = 'lease_expires_at'
+		)
+	`).Scan(&columnExists)
+	if err != nil {
+		return err
+	}
+	if !columnExists {
+		migrationSQL, err := os.ReadFile(leasePath)
+		if err != nil {
+			return err
+		}
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		return err
+	}
+
+	_, err = pool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public'
+					AND table_name = 'task_runs'
+					AND column_name = 'last_hearbeat_at'
+			) AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public'
+					AND table_name = 'task_runs'
+					AND column_name = 'last_heartbeat_at'
+			) THEN
+				ALTER TABLE task_runs RENAME COLUMN last_hearbeat_at TO last_heartbeat_at;
+			END IF;
+		END $$;
+		ALTER TABLE task_runs
+			ADD COLUMN IF NOT EXISTS locked_by TEXT,
+			ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
+		DROP INDEX IF EXISTS idx_task_runs_expired;
+		CREATE INDEX idx_task_runs_expired
+			ON task_runs (lease_expires_at, id)
+			WHERE status = 'running'
+				AND lease_expires_at IS NOT NULL;
 	`)
 	return err
 }
@@ -583,6 +641,118 @@ func TestValidInserts_SameTaskNameAcrossDifferentWorkflows(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("expected same task name to be allowed across workflows, got %d rows", count)
+	}
+}
+
+func TestTaskRunLeaseSchema(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	for _, column := range []string{"locked_by", "lease_expires_at", "last_heartbeat_at"} {
+		var nullable string
+		err := pool.QueryRow(ctx, `
+			SELECT is_nullable
+			FROM information_schema.columns
+			WHERE table_schema = 'public'
+				AND table_name = 'task_runs'
+				AND column_name = $1
+		`, column).Scan(&nullable)
+		if err != nil {
+			t.Fatalf("load lease column %s: %v", column, err)
+		}
+		if nullable != "YES" {
+			t.Fatalf("expected lease column %s to be nullable, got %s", column, nullable)
+		}
+	}
+
+	var indexDef string
+	err := pool.QueryRow(ctx, `
+		SELECT pg_get_indexdef(indexrelid)
+		FROM pg_index
+		WHERE indexrelid = 'idx_task_runs_expired'::regclass
+	`).Scan(&indexDef)
+	if err != nil {
+		t.Fatalf("load expired lease index: %v", err)
+	}
+	for _, want := range []string{"lease_expires_at", "running", "lease_expires_at IS NOT NULL"} {
+		if !strings.Contains(indexDef, want) {
+			t.Fatalf("expected expired lease index to contain %q, got %s", want, indexDef)
+		}
+	}
+}
+
+func TestExpiredLeaseQueryIgnoresTerminalTaskRuns(t *testing.T) {
+	pool := testPool(t)
+	ctx, tx := beginTx(t, pool)
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+
+	if err := insertWorkflow(ctx, tx, workflowAID, "wf"); err != nil {
+		t.Fatalf("insert workflow: %v", err)
+	}
+	if err := insertTask(ctx, tx, taskExtractID, workflowAID, "extract", "http"); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	if err := insertTask(ctx, tx, taskTransformID, workflowAID, "transform", "http"); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	if err := insertTask(ctx, tx, taskLoadID, workflowAID, "load", "http"); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	extraTaskID := "00000000-0000-0000-0000-0000000000a4"
+	if err := insertTask(ctx, tx, extraTaskID, workflowAID, "notify", "http"); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	workflowRunID := "00000000-0000-0000-0000-0000000000ca"
+	if err := insertWorkflowRun(ctx, tx, workflowRunID, workflowAID); err != nil {
+		t.Fatalf("insert workflow run: %v", err)
+	}
+
+	rows := []struct {
+		id      string
+		taskID  string
+		status  string
+		expires time.Time
+	}{
+		{"00000000-0000-0000-0000-0000000000d8", taskExtractID, "running", now.Add(-time.Minute)},
+		{"00000000-0000-0000-0000-0000000000d9", taskTransformID, "completed", now.Add(-time.Minute)},
+		{"00000000-0000-0000-0000-0000000000da", taskLoadID, "dead_letter", now.Add(-time.Minute)},
+		{"00000000-0000-0000-0000-0000000000db", extraTaskID, "running", now.Add(time.Minute)},
+	}
+	for _, row := range rows {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO task_runs (id, workflow_id, workflow_run_id, task_id, status, locked_by, lease_expires_at, last_heartbeat_at)
+			VALUES ($1, $2, $3, $4, $5, 'worker-1', $6, $7)
+		`, row.id, workflowAID, workflowRunID, row.taskID, row.status, row.expires, now)
+		if err != nil {
+			t.Fatalf("insert leased task run %s: %v", row.id, err)
+		}
+	}
+
+	var expired []string
+	queryRows, err := tx.Query(ctx, `
+		SELECT id
+		FROM task_runs
+		WHERE status = 'running'
+			AND lease_expires_at <= $1
+		ORDER BY id
+	`, now)
+	if err != nil {
+		t.Fatalf("query expired leases: %v", err)
+	}
+	defer queryRows.Close()
+	for queryRows.Next() {
+		var id string
+		if err := queryRows.Scan(&id); err != nil {
+			t.Fatalf("scan expired lease: %v", err)
+		}
+		expired = append(expired, id)
+	}
+	if err := queryRows.Err(); err != nil {
+		t.Fatalf("iterate expired leases: %v", err)
+	}
+
+	if len(expired) != 1 || expired[0] != "00000000-0000-0000-0000-0000000000d8" {
+		t.Fatalf("expected only expired running task run, got %#v", expired)
 	}
 }
 
