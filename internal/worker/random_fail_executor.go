@@ -47,7 +47,7 @@ func (e RandomFailExecutor) Execute(
 	case 0:
 		return ExecutionResult{Output: map[string]any{"status": "completed", "success": true}}, nil
 	case 1:
-		return ExecutionResult{FailureReason: randomFailFailureReason}, nil
+		return ExecutionResult{FailureReason: randomFailFailureReason, Retryable: true}, nil
 	default:
 		draw := rand.Float64()
 		if e.rand != nil {
@@ -58,7 +58,7 @@ func (e RandomFailExecutor) Execute(
 		}
 
 		if draw < failureProbability {
-			return ExecutionResult{FailureReason: randomFailFailureReason}, nil
+			return ExecutionResult{FailureReason: randomFailFailureReason, Retryable: true}, nil
 		}
 
 		return ExecutionResult{Output: map[string]any{"status": "completed", "success": true}}, nil

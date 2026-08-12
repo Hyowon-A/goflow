@@ -36,6 +36,9 @@ func TestRandomFailExecutorFailsWhenProbabilityIsOne(t *testing.T) {
 	if result.Output != nil {
 		t.Fatalf("expected no output on failure, got %q", result.Output)
 	}
+	if !result.Retryable {
+		t.Fatal("expected random failure to be retryable")
+	}
 }
 
 func TestRandomFailExecutorUsesRandomDraw(t *testing.T) {
