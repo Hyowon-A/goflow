@@ -19,6 +19,7 @@ flowchart LR
     Outbox --> Redis[(Redis Streams)]
     Redis --> Workers[Worker pool]
     Workers --> Postgres
+    API --> Metrics[GET /metrics]
 ```
 
 ## Database Schema
@@ -180,7 +181,7 @@ coordination. The repository owns SQL and converts database constraint failures
 such as duplicate task names or missing workflows into meaningful workflow
 errors.
 
-Implemented workflow API endpoints:
+Implemented API endpoints:
 
 | Method | Path | Responsibility |
 | --- | --- | --- |
@@ -191,6 +192,9 @@ Implemented workflow API endpoints:
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Read workflow-run status and input. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs` | List task-run statuses for one workflow run. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts` | List task attempts and failure reasons. |
+| `GET` | `/health` | Return API liveness. |
+| `GET` | `/ready` | Check PostgreSQL readiness. |
+| `GET` | `/metrics` | Return process-local Prometheus text metrics. |
 
 Workflow-run creation accepts an optional `Idempotency-Key` header. The key is
 scoped to the workflow ID for this endpoint. Repeating the same key with the
@@ -209,6 +213,25 @@ turn database failures into stable API errors, including duplicate task names,
 duplicate dependencies, missing workflows and invalid task references.
 Dependency cycle validation returns a stable `dependency_cycle` error with
 `400 Bad Request`.
+
+## Observability
+
+The API exposes a stdlib-backed metrics registry at `GET /metrics` using
+Prometheus text format. Metrics are process-local and in-memory, so they reset
+when the process restarts. The API command registers repository-backed gauges
+for pending outbox events, running task runs and expired running leases.
+
+Counters are emitted from workflow-run creation, workflow finalization, task
+attempt and task-run completion, scheduler queueing, outbox publishing and
+publish failures, lease recovery, worker heartbeats, late completion rejection,
+Redis acknowledgement and intentional pending-message decisions. Worker service
+metrics are available when a registry is injected; the standalone `cmd/worker`
+does not expose a separate HTTP metrics endpoint yet.
+
+Logs use structured fields for request IDs, workflow IDs, task-run IDs,
+attempt IDs, worker IDs, Redis message IDs, outbox event IDs and stable
+reasons. Workflow input, task config, task output and idempotency request
+hashes are not logged.
 
 ## Task Queue
 

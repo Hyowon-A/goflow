@@ -162,3 +162,27 @@ lease is expired. In those cases completion returns
 Redis message.
 
 Manual dead-letter replay remains future work.
+
+## Failure Observability
+
+The API exposes process-local Prometheus text metrics at `/metrics`. They reset
+on process restart and should be treated as runtime signals, not durable audit
+history.
+
+Useful failure-path metrics include:
+
+- `goflow_outbox_pending`
+- `goflow_outbox_publish_failures_total`
+- `goflow_worker_lease_heartbeat_failures_total`
+- `goflow_worker_lease_recoveries_total`
+- `goflow_worker_late_completions_rejected_total`
+- `goflow_worker_messages_left_pending_total`
+- `goflow_task_attempts_failed_total`
+- `goflow_task_runs_dead_lettered_total`
+- `goflow_workflow_runs_failed_total`
+
+PostgreSQL remains the source of durable failure history through
+`workflow_runs`, `task_runs`, `task_attempts` and `task_outbox_events`.
+Redis pending entries show delivery gaps that have not been acknowledged.
+Local failure-injection checks and inspection queries are documented in
+[Operations checks](operations.md).

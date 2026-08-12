@@ -272,6 +272,49 @@ All architectural decisions, code changes and reliability claims are reviewed an
 
 - Ran `go test -count=1 ./...`
 
+## Day 15
+
+### AI-assisted work
+
+- Added a small in-process metrics registry with Prometheus text rendering
+- Exposed API process metrics at `GET /metrics`
+- Wired workflow, scheduler, outbox and worker service counters
+- Added repository-backed gauges for pending outbox rows, running task runs and
+  expired running leases
+- Tightened scheduler, outbox and worker logs around recovery and failure paths
+- Added `cmd/loadcheck` for a repeatable local `A -> B, C -> D` workload
+- Documented local failure-injection checks and operational inspection queries
+
+### Accepted suggestions
+
+- Kept metrics process-local and dependency-free for Day 15
+- Used low-cardinality metric names without workflow, task or worker labels
+- Reused PostgreSQL count queries for gauges instead of caching state in memory
+- Kept load checking as one Go command with in-process workers
+- Kept destructive or timing-sensitive failure checks manual in operations docs
+
+### Modified suggestions
+
+- Documented worker service metrics as injectable hooks because `cmd/worker`
+  does not expose a worker HTTP metrics endpoint yet
+- Used a dedicated load-check Redis stream by default so local queue data is
+  not mixed with validation runs
+
+### Rejected suggestions
+
+- Rejected a Prometheus client dependency while stdlib rendering is enough
+- Rejected Grafana dashboards during Day 15
+- Rejected distributed tracing and high-cardinality metric labels
+- Rejected a separate operations service or chaos framework
+
+### Validation performed
+
+- Ran `go test -count=1 ./...`
+- Ran `go vet ./...`
+- Ran `git diff --check`
+- Ran `make check`
+- Ran `go run ./cmd/loadcheck -runs 2 -workers 1 -timeout 20s`
+
 ## Day 3
 
 ### AI-assisted work

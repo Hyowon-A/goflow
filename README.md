@@ -31,6 +31,10 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Workflow, task-run and task-attempt state transition validation
 - Consistent JSON error responses with request IDs
 - Structured request, idempotency, scheduler and duplicate-message logging
+- Prometheus-style API metrics at `GET /metrics`
+- Local load-check command for a repeatable `A -> B, C -> D` workflow
+- Operations checks for Redis outages, stopped workers, duplicates and retry
+  exhaustion
 - Graceful shutdown on `Ctrl+C` and `SIGTERM`
 - Standardised development commands through a `Makefile`
 
@@ -74,7 +78,8 @@ flowchart TD
 ```
 
 Redis says which task run a worker should try. PostgreSQL decides whether that
-worker is allowed to own it.
+worker is allowed to own it. The API exposes process-local Prometheus text
+metrics at `/metrics`; these values reset on process restart.
 
 ## Database Schema
 
@@ -166,12 +171,14 @@ Schema files:
 ```text
 cmd/
   api/
+  loadcheck/
   worker/
 
 internal/
   config/
   database/
   httpserver/
+  metrics/
   queue/
   scheduler/
   worker/
@@ -215,6 +222,17 @@ Run formatting, static analysis, and tests:
 make check
 ```
 
+Run the local load check against PostgreSQL and Redis:
+
+```sh
+go run ./cmd/loadcheck -runs 10 -workers 2 -timeout 60s
+```
+
+The load check creates a diamond-shaped workflow, starts in-process workers and
+prints workflow completions, failures, attempts, retries, dead letters and
+outbox backlog. It uses a dedicated Redis stream based on `QUEUE_STREAM_NAME`
+unless `-stream` is provided.
+
 ## Configuration
 
 The API loads configuration from the environment. During local development,
@@ -245,6 +263,7 @@ which overrides the code default during local development.
 | --- | --- | --- |
 | `GET` | `/health` | Returns basic API liveness information. |
 | `GET` | `/ready` | Checks whether the API can reach PostgreSQL. |
+| `GET` | `/metrics` | Returns process-local Prometheus text metrics. |
 | `POST` | `/workflows` | Creates a reusable workflow definition. |
 | `POST` | `/workflows/{workflowID}/tasks` | Creates a task definition inside a workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Creates a dependency between two tasks in a workflow. |
@@ -291,10 +310,20 @@ API errors use a consistent JSON shape:
 The API echoes `X-Request-ID` when provided and generates one when it is
 missing. Request logs include method, path, status, duration and request ID.
 
+Metrics are exposed by the API process:
+
+```sh
+curl -sS "$API/metrics" | rg 'goflow_outbox_pending|goflow_task_runs_running|goflow_worker_lease_recoveries_total'
+```
+
+The standalone worker command has metric hooks in the worker service, but it
+does not expose its own HTTP metrics endpoint yet.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Failure model](docs/failure-model.md)
+- [Operations checks](docs/operations.md)
 - [Test strategy](docs/test-strategy.md)
 - [AI-assisted development](docs/ai-assisted-development.md)
 - [ADR-002: Use Redis Streams for the Initial Task Queue](docs/adr/ADR-002-redis-streams-task-queue.md)
@@ -304,9 +333,8 @@ missing. Request logs include method, path, status, duration and request ID.
 - Broader idempotency cleanup and retention policy
 - Manual dead-letter replay
 - Periodic due-retry scanning from the worker command
-- Prometheus metrics
+- Worker-process metrics HTTP endpoint
 - Grafana dashboards
-- Load testing and failure injection
 
 ## Development Principles
 

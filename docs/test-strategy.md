@@ -12,7 +12,8 @@ and Redis-backed worker execution.
 
 Handler tests cover API behavior that does not require a real database, such as
 health checks, readiness checks, JSON decoding, request IDs and structured
-logging.
+logging. Metrics tests cover the in-process registry, Prometheus text rendering,
+gauge evaluation and the `GET /metrics` handler.
 
 Workflow unit tests cover pure graph behavior without PostgreSQL. They prove
 adjacency-list construction, in-degree counts, deterministic roots and leaves,
@@ -78,11 +79,16 @@ Expired-lease recovery tests cover requeueing with attempts remaining,
 dead-lettering exhausted task runs, failing the open attempt with
 `lease_expired`, concurrent recovery loops with `SKIP LOCKED`, outbox creation
 for recovered queued work, and claiming recovered tasks by a different worker.
+Load-check tests cover flag validation, summary rendering and invariant checks
+without requiring PostgreSQL or Redis.
 
 ## Current Coverage
 
 - `GET /health`
 - `GET /ready`
+- `GET /metrics`
+- Metrics contract, registry rendering, gauge evaluation and gauge error
+  handling
 - `POST /workflows`
 - `POST /workflows/{workflowID}/tasks`
 - `POST /workflows/{workflowID}/dependencies`
@@ -138,6 +144,11 @@ for recovered queued work, and claiming recovered tasks by a different worker.
 - Duplicate scheduler calls do not queue the same task run twice
 - Scheduler no-op logging when no runnable task runs changed state
 - Expired running task-run recovery and recovered-task outbox dispatch
+- Workflow, scheduler, outbox and worker metrics counters
+- Repository-backed gauges for pending outbox events, running task runs and
+  expired leases
+- Payload-safe structured logs for duplicate and failure paths
+- Local load-check summary and invariant logic
 
 ## Validation Commands
 
@@ -151,6 +162,12 @@ Run the HTTP API tests:
 
 ```sh
 go test ./internal/httpserver -v
+```
+
+Run the metrics tests:
+
+```sh
+go test ./internal/metrics -v
 ```
 
 Run the database constraint tests:
@@ -175,6 +192,12 @@ Run the worker service tests:
 
 ```sh
 go test ./internal/worker -v
+```
+
+Run the load-check unit tests:
+
+```sh
+go test ./cmd/loadcheck -v
 ```
 
 Run the retry-focused packages:
@@ -215,6 +238,15 @@ docker compose exec redis redis-cli XPENDING goflow:tasks:validation goflow-work
 
 The executable message should be acknowledged after the task run reaches a
 terminal state; the failed-claim message should remain pending.
+
+Manual failure-injection checks for Redis outages, stopped workers, duplicate
+Redis delivery and retry exhaustion are documented in
+[Operations checks](operations.md). Those scenarios are kept manual when they
+depend on stopping local services or timing worker processes; deterministic
+pieces are covered by the repository, scheduler, queue and worker tests above.
+
+Inspection queries for PostgreSQL, Redis and `/metrics` are also documented in
+[Operations checks](operations.md).
 
 ## Testing Principles
 
