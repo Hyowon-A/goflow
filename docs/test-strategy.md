@@ -56,6 +56,8 @@ also verify duplicate queue messages for already-owned or terminal task runs
 are acknowledged without creating another attempt and emit structured duplicate
 message logs. The acknowledgement tests assert the ordering explicitly:
 PostgreSQL completion first, successor scheduling second, Redis ack last.
+Lease tests verify claim-time lease fields, heartbeat extension, lost-lease
+cancellation and no acknowledgement when late completion is rejected.
 
 Worker executor tests cover the built-in `sleep`, `log` and `random_fail`
 executors. Worker service integration tests use PostgreSQL with fake queue
@@ -72,6 +74,10 @@ that due retry scheduling dispatches through the same outbox path when the
 scheduler service is invoked. Outbox tests cover transactional outbox row
 creation, concurrent claiming, publish failure retry visibility, and
 crash-before-publish recovery with a fake publisher.
+Expired-lease recovery tests cover requeueing with attempts remaining,
+dead-lettering exhausted task runs, failing the open attempt with
+`lease_expired`, concurrent recovery loops with `SKIP LOCKED`, outbox creation
+for recovered queued work, and claiming recovered tasks by a different worker.
 
 ## Current Coverage
 
@@ -110,8 +116,10 @@ crash-before-publish recovery with a fake publisher.
 - Redis Streams publisher integration with real Redis when available
 - Redis Streams consumer group setup and acknowledgement behavior
 - Conditional task-run claiming from `queued` to `running`
+- Task-run lease fields on claim and heartbeat extension
 - Task-run execution loading
 - Task-attempt creation and completion
+- Late worker completion rejection after lease recovery
 - Retry policy parsing and retry decision logic
 - Retry-wait persistence with `next_retry_at`
 - Due retry queueing through transactional outbox rows
@@ -122,12 +130,14 @@ crash-before-publish recovery with a fake publisher.
 - Workflow-run, task-run and task-attempt inspection APIs
 - Built-in worker executors
 - Worker receive, claim, execute, complete and acknowledgement coordination
+- Worker heartbeat lost-lease handling
 - Duplicate queue-message acknowledgement and logging
 - Scheduler queueing for runnable task runs
 - Transactional task outbox row creation and dispatcher recovery
 - Fan-out and fan-in DAG scheduling
 - Duplicate scheduler calls do not queue the same task run twice
 - Scheduler no-op logging when no runnable task runs changed state
+- Expired running task-run recovery and recovered-task outbox dispatch
 
 ## Validation Commands
 

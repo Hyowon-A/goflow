@@ -237,6 +237,41 @@ All architectural decisions, code changes and reliability claims are reviewed an
 
 - Ran `go test ./internal/workflow ./internal/httpserver ./internal/worker`
 
+## Day 14
+
+### AI-assisted work
+
+- Added task-run lease fields: `locked_by`, `lease_expires_at` and `last_heartbeat_at`
+- Updated task-run claiming to record worker ownership and lease expiry
+- Added worker heartbeat extension while executors run
+- Added expired running task-run recovery with `SKIP LOCKED`
+- Marked open attempts failed with `lease_expired` during recovery
+- Requeued recovered task runs with attempts remaining and moved exhausted task runs to `dead_letter`
+- Reused the transactional task outbox for recovered queued work
+- Rejected late worker completion unless the current attempt is running, the task run is still `running`, the worker owns `locked_by` and the lease is active
+- Added `WORKER_LEASE_DURATION`, `WORKER_HEARTBEAT_INTERVAL` and `WORKER_RECOVERY_INTERVAL`
+- Added tests for lease schema, claiming, heartbeat extension, recovery, stale completion rejection, worker no-ack behavior and config validation
+
+### Accepted suggestions
+
+- Kept lease ownership on `task_runs` instead of adding a separate lease table
+- Used PostgreSQL row locks with `SKIP LOCKED` instead of leader election
+- Reused the existing worker process and scheduler service instead of adding a recovery binary
+- Kept recovered task dispatch on the existing task outbox path
+- Required heartbeat interval to be shorter than lease duration
+
+### Rejected suggestions
+
+- Rejected leader election during Day 14
+- Rejected manual dead-letter replay during Day 14
+- Rejected claiming exactly-once external side effects
+- Rejected dashboards and metrics during Day 14
+- Rejected a separate due-retry loop in the worker command during Day 14
+
+### Validation performed
+
+- Ran `go test -count=1 ./...`
+
 ## Day 3
 
 ### AI-assisted work

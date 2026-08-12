@@ -45,6 +45,9 @@ Execution tables:
 represents one logical execution of a task inside that workflow run.
 `task_attempts` records each physical retry attempt for a task run, including
 attempt number, status, timestamps and failure reason.
+Claimed task runs also store `locked_by`, `lease_expires_at` and
+`last_heartbeat_at` so a worker can renew ownership while it executes and a
+later recovery pass can reclaim work from crashed workers.
 
 Runtime input and output values live on run tables. Definition-level schemas
 and task executor configuration live on definition tables.
@@ -274,13 +277,16 @@ current worker flow processes one message at a time:
 1. Receive one Redis message.
 2. Parse and validate the task message fields.
 3. Claim the referenced task run in PostgreSQL by moving it from `queued` to
-   `running`.
+   `running` and setting `locked_by`, `lease_expires_at` and
+   `last_heartbeat_at`.
 4. Load the task definition, executor type, task config and task-run input.
 5. Create a running `task_attempt`.
 6. Validate task retry policy.
-7. Resolve and run the configured executor.
+7. Resolve and run the configured executor while heartbeating the task-run
+   lease.
 8. Complete the task attempt and task run as `completed`, `dead_letter` or
-   `retry_wait`.
+   `retry_wait` only if the task run is still owned by the worker and the lease
+   is active.
 9. Finalize the workflow run when all task runs are terminal.
 10. Acknowledge the Redis message only after completion is persisted.
 
@@ -290,11 +296,12 @@ flowchart TD
     Read --> Pending[Redis pending entry]
     Pending --> Claim[PostgreSQL claim queued to running]
     Claim -->|succeeds| Work[Load task and create attempt]
-    Work --> Execute[Executor.Execute]
+    Work --> Execute[Executor.Execute with heartbeat]
     Execute --> Complete[CompleteTaskAttempt]
     Complete --> Finalize[Finalize workflow run]
     Finalize --> Ack[XACK message_id]
     Complete -->|retryable failure| RetryWait[retry_wait until next_retry_at]
+    Complete -->|lost lease or stale attempt| NoAck
     Ack --> Removed[Redis pending entry removed]
     Claim -->|fails| Status[Load current task-run status]
     Status -->|running/completed/failed/dead_letter| AckDuplicate[XACK duplicate]
@@ -328,6 +335,13 @@ pending so the task is not acknowledged before PostgreSQL records the outcome.
 Acknowledged duplicate messages emit `duplicate_task_message` with workflow,
 task, Redis message, worker, status and reason fields.
 
+The worker extends the lease while executor code is running. If the heartbeat
+cannot extend the lease, execution is cancelled and the Redis message is left
+pending. Completion also checks the current attempt, task-run status,
+`locked_by` and lease expiry before writing an outcome. A late worker whose
+lease has already been recovered receives `task_attempt_not_completable`, and
+the original Redis message is not acknowledged.
+
 Built-in executors are intentionally small:
 
 | Executor type | Behavior |
@@ -336,8 +350,7 @@ Built-in executors are intentionally small:
 | `log` | Logs a message from task config or task-run input and returns it as output. |
 | `random_fail` | Fails based on `failure_probability`; useful for failure-path testing. |
 
-Redis pending-message recovery, leases and manual dead-letter replay remain
-future work.
+Redis pending-message recovery and manual dead-letter replay remain future work.
 
 ## DAG Scheduling
 
@@ -355,6 +368,8 @@ flowchart TD
     Tx --> DueRetry[Queue due retry_wait task_runs]
     Queue --> Outbox[Insert task_outbox_events]
     DueRetry --> Outbox
+    Tx --> Recover[Recover expired running task_runs]
+    Recover --> Outbox
     Outbox --> Commit[Commit]
     Commit --> Dispatch[Outbox dispatcher claims pending rows]
     Dispatch --> Publish[Publish Redis task message]
@@ -379,7 +394,12 @@ dispatch path as DAG scheduling.
 The API triggers root scheduling after workflow-run creation commits. Worker
 completion can call the same scheduler path to release newly ready successors.
 The scheduler service exposes due-retry queueing, but the worker command
-currently only dispatches existing outbox rows; it does not run a due-retry scan
-itself. Synchronous dispatch is an optimization. The recovery boundary is the
-durable outbox row, so a later dispatcher pass can publish rows left behind by a
-crash or Redis outage.
+currently does not run a due-retry scan itself. It does dispatch existing outbox
+rows and runs expired-lease recovery on `WORKER_RECOVERY_INTERVAL`. Recovery
+finds `running` task runs whose leases expired, marks the open attempt failed
+with `lease_expired`, clears lease fields, and moves the task run to `queued`
+when attempts remain or `dead_letter` when they are exhausted. Requeued
+recoveries insert task outbox rows, then use the same dispatcher path as DAG and
+retry scheduling. Synchronous dispatch is an optimization. The recovery boundary
+is the durable outbox row, so a later dispatcher pass can publish rows left
+behind by a crash or Redis outage.

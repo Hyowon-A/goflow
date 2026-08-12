@@ -89,9 +89,9 @@ is intentionally not implemented.
 
 Successful executor output completes both the attempt and task run. Unknown
 executor types and non-retryable executor failures complete the attempt and
-task run as failed. Retryable failures with attempts remaining complete the
-attempt as failed, move the task run to `retry_wait` and store `next_retry_at`.
-Exhausted retry attempts end as permanent task-run failures.
+move the task run to `dead_letter`. Retryable failures with attempts remaining
+complete the attempt as failed, move the task run to `retry_wait` and store
+`next_retry_at`. Exhausted retry attempts end as `dead_letter`.
 
 The task outbox only protects scheduler-to-Redis delivery. It records queued
 task messages in the same PostgreSQL transaction as the task-run state change,
@@ -114,12 +114,13 @@ sequenceDiagram
     Worker->>Redis: XREADGROUP task message
     Worker->>Postgres: persist task completion, failure or retry_wait
     Scheduler->>Postgres: move due retry_wait task_run to queued and insert outbox row
+    Scheduler->>Postgres: recover expired running task_run and insert outbox row when requeued
     Worker->>Redis: XACK only after completion persists
 ```
 
-The scheduler service supports the due-retry queueing step above. The current
-worker command only dispatches existing outbox rows and does not periodically
-invoke that due-retry scan itself.
+The scheduler service supports the due-retry queueing step above. The worker
+command dispatches existing outbox rows and runs expired-lease recovery, but it
+does not periodically invoke the due-retry scan itself.
 
 Duplicate queue messages are handled at the PostgreSQL claim boundary. If a
 task run is already `running`, `completed`, `failed` or `dead_letter`, the
@@ -136,9 +137,28 @@ After each persisted task outcome, workflow finalization marks the workflow run
 dead-lettered. API clients can inspect the workflow run, its task runs and task
 attempt failure reasons through the read endpoints.
 
-## Remaining Worker Failure Handling
+## Worker Leases And Recovery
 
 Workers process tasks with at-least-once delivery semantics. Task execution
-must be idempotent or guarded against duplicate side effects. Worker leases,
-heartbeats, expired-lease recovery and manual dead-letter replay remain future
-work.
+must be idempotent or guarded against duplicate side effects.
+
+Claiming a queued task run records the worker in `locked_by`, sets
+`lease_expires_at` and stores `last_heartbeat_at`. While the executor runs, the
+worker periodically extends the lease. If lease extension fails, the worker
+cancels execution and leaves the Redis message pending.
+
+Expired-lease recovery runs in the worker process on
+`WORKER_RECOVERY_INTERVAL`. It finds `running` task runs whose leases expired
+using PostgreSQL row locks with `SKIP LOCKED`, marks the open attempt failed
+with `lease_expired`, clears lease fields and then either requeues the task run
+or moves it to `dead_letter` when attempts are exhausted. Requeued task runs get
+a task outbox row and are published through the same dispatcher path as normal
+scheduling.
+
+Late worker completion is rejected if the task run is no longer `running`, the
+attempt is no longer running, the worker no longer owns `locked_by`, or the
+lease is expired. In those cases completion returns
+`task_attempt_not_completable` and the worker does not acknowledge the original
+Redis message.
+
+Manual dead-letter replay remains future work.

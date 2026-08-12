@@ -22,6 +22,7 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Due-retry queueing support through the scheduler service
 - Transactional task outbox publishing and recovery
 - Worker task-run claiming from `queued` to `running`
+- Worker leases, heartbeats and expired-lease recovery
 - Worker task execution with task-attempt creation and completion
 - Idempotent workflow-run submission with `Idempotency-Key`
 - Duplicate queue-message acknowledgement for already-owned or terminal task runs
@@ -51,10 +52,11 @@ Redis Streams is the task-delivery boundary. The current implementation can
 publish task messages to a configured stream, consume them with Redis consumer
 groups, queue runnable task runs with matching outbox rows transactionally,
 recover unpublished outbox rows, claim queued task runs in PostgreSQL, execute
-the task, persist a task attempt, and acknowledge Redis messages only after
-completion is persisted. The scheduler service can also queue due retry task
-runs with matching outbox rows; the worker command currently dispatches existing
-outbox rows but does not run a due-retry scan itself.
+the task under a renewable lease, persist a task attempt, and acknowledge Redis
+messages only after completion is persisted. The scheduler service can also
+queue due retry task runs with matching outbox rows; the worker command
+dispatches existing outbox rows and periodically recovers expired running task
+runs, but it does not run a due-retry scan itself.
 
 ```mermaid
 flowchart TD
@@ -84,7 +86,8 @@ runtime execution state.
 `workflow_runs` and `task_runs` store runtime inputs, outputs, statuses and
 timestamps. `task_attempts` stores individual retry attempts so failures are not
 overwritten by later retries. `task_outbox_events` stores durable Redis publish
-work for queued task runs.
+work for queued task runs. Claimed task runs store `locked_by`,
+`lease_expires_at` and `last_heartbeat_at` so crashed workers can be recovered.
 
 Task retry policy is read from task `config.retry`:
 
@@ -228,6 +231,9 @@ values can be provided through `.env`.
 | `QUEUE_CONSUMER_GROUP` | No | `goflow-workers` | Redis consumer group used by workers. |
 | `QUEUE_BLOCK_TIMEOUT` | No | `1s` | Blocking read timeout for worker Redis reads. |
 | `QUEUE_READ_COUNT` | No | `1` | Maximum messages read per worker Redis read. |
+| `WORKER_LEASE_DURATION` | No | `30s` | Time a worker owns a claimed task before it is recoverable. |
+| `WORKER_HEARTBEAT_INTERVAL` | No | `10s` | Interval for extending active task-run leases. Must be shorter than `WORKER_LEASE_DURATION`. |
+| `WORKER_RECOVERY_INTERVAL` | No | `30s` | Interval for recovering expired task-run leases. |
 
 The provided `.env.example` points at the local Docker Compose PostgreSQL
 instance on port `5433` and Redis on port `6379`. It also sets `HTTP_PORT=8081`,
@@ -296,8 +302,8 @@ missing. Request logs include method, path, status, duration and request ID.
 ## Planned Features
 
 - Broader idempotency cleanup and retention policy
-- Dead-letter handling
-- Worker heartbeat and lease recovery
+- Manual dead-letter replay
+- Periodic due-retry scanning from the worker command
 - Prometheus metrics
 - Grafana dashboards
 - Load testing and failure injection
