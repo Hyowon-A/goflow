@@ -35,23 +35,33 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
-		SELECT id
+		SELECT tasks.id,
+			NOT EXISTS (
+				SELECT 1
+				FROM task_dependencies
+				WHERE task_dependencies.workflow_id = tasks.workflow_id
+					AND task_dependencies.successor_task_id = tasks.id
+			) AS is_root
 		FROM tasks
-		WHERE workflow_id = $1
-		ORDER BY created_at, id
+		WHERE tasks.workflow_id = $1
+		ORDER BY tasks.created_at, tasks.id
 	`, workflowID)
 	if err != nil {
 		return WorkflowRun{}, fmt.Errorf("list workflow tasks: %w", err)
 	}
 
-	var taskIDs []string
+	type taskRunSeed struct {
+		id     string
+		isRoot bool
+	}
+	var taskRuns []taskRunSeed
 	for rows.Next() {
-		var taskID string
-		if err := rows.Scan(&taskID); err != nil {
+		var taskRun taskRunSeed
+		if err := rows.Scan(&taskRun.id, &taskRun.isRoot); err != nil {
 			rows.Close()
 			return WorkflowRun{}, fmt.Errorf("scan workflow task: %w", err)
 		}
-		taskIDs = append(taskIDs, taskID)
+		taskRuns = append(taskRuns, taskRun)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -59,7 +69,7 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 	}
 	rows.Close()
 
-	if len(taskIDs) == 0 {
+	if len(taskRuns) == 0 {
 		var workflowExists bool
 		err := tx.QueryRow(ctx, `
 			SELECT EXISTS (
@@ -106,12 +116,16 @@ func (r *PostgresRepository) CreateWorkflowRun(ctx context.Context, workflowID s
 		return WorkflowRun{}, fmt.Errorf("create workflowRun: %w", err)
 	}
 
-	for _, taskID := range taskIDs {
+	for _, taskRun := range taskRuns {
 		taskRunID := uuid.NewString()
+		var taskRunInput any
+		if taskRun.isRoot {
+			taskRunInput = input.Input
+		}
 		_, err := tx.Exec(ctx, `
-			INSERT INTO task_runs (id, workflow_id, workflow_run_id, task_id, status, attempt_count)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, taskRunID, workflowID, workflowRunID, taskID, "pending", 0)
+			INSERT INTO task_runs (id, workflow_id, workflow_run_id, task_id, status, attempt_count, input)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, taskRunID, workflowID, workflowRunID, taskRun.id, "pending", 0, taskRunInput)
 		if err != nil {
 			return WorkflowRun{}, fmt.Errorf("create task run: %w", err)
 		}
@@ -136,7 +150,7 @@ func existingWorkflowRunForIdempotencyKey(ctx context.Context, tx pgx.Tx, workfl
 	var workflowRun WorkflowRun
 	var existingHash *string
 	err := tx.QueryRow(ctx, `
-		SELECT id, workflow_id, status, input, request_hash
+		SELECT id, workflow_id, status, input, output, request_hash
 		FROM workflow_runs
 		WHERE workflow_id = $1
 			AND idempotency_key = $2
@@ -145,6 +159,7 @@ func existingWorkflowRunForIdempotencyKey(ctx context.Context, tx pgx.Tx, workfl
 		&workflowRun.WorkflowID,
 		&workflowRun.Status,
 		&workflowRun.Input,
+		&workflowRun.Output,
 		&existingHash,
 	)
 	if err != nil {
@@ -166,7 +181,7 @@ func (r *PostgresRepository) GetWorkflowRun(ctx context.Context, workflowID, wor
 
 	var workflowRun WorkflowRun
 	err := r.db.QueryRow(ctx, `
-		SELECT id, workflow_id, status, input
+		SELECT id, workflow_id, status, input, output
 		FROM workflow_runs
 		WHERE workflow_id = $1
 			AND id = $2
@@ -175,6 +190,7 @@ func (r *PostgresRepository) GetWorkflowRun(ctx context.Context, workflowID, wor
 		&workflowRun.WorkflowID,
 		&workflowRun.Status,
 		&workflowRun.Input,
+		&workflowRun.Output,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -595,21 +611,56 @@ func (r *PostgresRepository) QueueRunnableTaskRuns(ctx context.Context, workflow
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
+		WITH runnable AS (
+			SELECT tr.id, tr.workflow_id, tr.workflow_run_id, tr.task_id
+			FROM task_runs tr
+			WHERE tr.workflow_run_id = $1
+				AND tr.status = $3
+				AND NOT EXISTS (
+					SELECT 1
+					FROM task_dependencies d
+					LEFT JOIN task_runs pred
+						ON pred.workflow_id = tr.workflow_id
+						AND pred.workflow_run_id = tr.workflow_run_id
+						AND pred.task_id = d.predecessor_task_id
+					WHERE d.workflow_id = tr.workflow_id
+						AND d.successor_task_id = tr.task_id
+						AND (pred.id IS NULL OR pred.status <> $4)
+				)
+		),
+		predecessor_inputs AS (
+			SELECT runnable.id AS task_run_id,
+				jsonb_object_agg(pred_task.name, pred.output) AS predecessors
+			FROM runnable
+			JOIN task_dependencies d
+				ON d.workflow_id = runnable.workflow_id
+				AND d.successor_task_id = runnable.task_id
+			JOIN task_runs pred
+				ON pred.workflow_id = runnable.workflow_id
+				AND pred.workflow_run_id = runnable.workflow_run_id
+				AND pred.task_id = d.predecessor_task_id
+			JOIN tasks pred_task
+				ON pred_task.workflow_id = pred.workflow_id
+				AND pred_task.id = pred.task_id
+			GROUP BY runnable.id
+		)
 		UPDATE task_runs tr
-		SET status = $2
-		WHERE tr.workflow_run_id = $1
+		SET status = $2,
+			input = CASE
+				WHEN predecessor_inputs.task_run_id IS NULL THEN tr.input
+				ELSE jsonb_build_object(
+					'workflow_input', wr.input,
+					'predecessors', COALESCE(predecessor_inputs.predecessors, '{}'::jsonb)
+				)
+			END
+		FROM runnable
+		JOIN workflow_runs wr
+			ON wr.id = runnable.workflow_run_id
+		LEFT JOIN predecessor_inputs
+			ON predecessor_inputs.task_run_id = runnable.id
+		WHERE tr.id = runnable.id
 			AND tr.status = $3
-			AND NOT EXISTS (
-				SELECT 1
-				FROM task_dependencies d
-				LEFT JOIN task_runs pred
-				  ON pred.workflow_id = tr.workflow_id
-				 AND pred.workflow_run_id = tr.workflow_run_id
-				 AND pred.task_id = d.predecessor_task_id
-				WHERE d.workflow_id = tr.workflow_id
-				  AND d.successor_task_id = tr.task_id
-				  AND (pred.id IS NULL OR pred.status <> $4))
-		RETURNING id, workflow_id, workflow_run_id, task_id, status
+		RETURNING tr.id, tr.workflow_id, tr.workflow_run_id, tr.task_id, tr.status
 	`, workflowRunID, TaskRunStatusQueued, TaskRunStatusPending, TaskRunStatusCompleted)
 	if err != nil {
 		return nil, fmt.Errorf("queue runnable task runs: %w", err)
@@ -726,7 +777,7 @@ func (r *PostgresRepository) FinalizeWorkflowRun(ctx context.Context, workflowRu
 	var workflowRun WorkflowRun
 	var currentStatus WorkflowRunStatus
 	err = tx.QueryRow(ctx, `
-		SELECT id, workflow_id, status, input
+		SELECT id, workflow_id, status, input, output
 		FROM workflow_runs
 		WHERE id = $1
 		FOR UPDATE
@@ -735,6 +786,7 @@ func (r *PostgresRepository) FinalizeWorkflowRun(ctx context.Context, workflowRu
 		&workflowRun.WorkflowID,
 		&currentStatus,
 		&workflowRun.Input,
+		&workflowRun.Output,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -782,18 +834,28 @@ func (r *PostgresRepository) FinalizeWorkflowRun(ctx context.Context, workflowRu
 		return WorkflowRun{}, false, err
 	}
 
+	var output any
+	if nextStatus == WorkflowRunStatusCompleted {
+		output, err = finalWorkflowRunOutput(ctx, tx, workflowRunID)
+		if err != nil {
+			return WorkflowRun{}, false, err
+		}
+	}
+
 	err = tx.QueryRow(ctx, `
 		UPDATE workflow_runs
 		SET status = $2,
+			output = $3,
 			started_at = COALESCE(started_at, now()),
 			completed_at = now()
 		WHERE id = $1
-		RETURNING id, workflow_id, status, input
-	`, workflowRunID, nextStatus).Scan(
+		RETURNING id, workflow_id, status, input, output
+	`, workflowRunID, nextStatus, output).Scan(
 		&workflowRun.ID,
 		&workflowRun.WorkflowID,
 		&currentStatus,
 		&workflowRun.Input,
+		&workflowRun.Output,
 	)
 	if err != nil {
 		return WorkflowRun{}, false, fmt.Errorf("update finalized workflow run: %w", err)
@@ -805,4 +867,50 @@ func (r *PostgresRepository) FinalizeWorkflowRun(ctx context.Context, workflowRu
 	}
 
 	return workflowRun, true, nil
+}
+
+func finalWorkflowRunOutput(ctx context.Context, tx pgx.Tx, workflowRunID string) (map[string]any, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT tasks.name, task_runs.output
+		FROM task_runs
+		JOIN tasks
+			ON tasks.workflow_id = task_runs.workflow_id
+			AND tasks.id = task_runs.task_id
+		WHERE task_runs.workflow_run_id = $1
+			AND NOT EXISTS (
+				SELECT 1
+				FROM task_dependencies d
+				WHERE d.workflow_id = task_runs.workflow_id
+					AND d.predecessor_task_id = task_runs.task_id
+			)
+		ORDER BY tasks.created_at, tasks.id
+	`, workflowRunID)
+	if err != nil {
+		return nil, fmt.Errorf("load workflow run leaf outputs: %w", err)
+	}
+	defer rows.Close()
+
+	leafOutputs := map[string]map[string]any{}
+	var onlyOutput map[string]any
+	for rows.Next() {
+		var taskName string
+		var output map[string]any
+		if err := rows.Scan(&taskName, &output); err != nil {
+			return nil, fmt.Errorf("scan workflow run leaf output: %w", err)
+		}
+		leafOutputs[taskName] = output
+		onlyOutput = output
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate workflow run leaf outputs: %w", err)
+	}
+	if len(leafOutputs) == 1 {
+		return onlyOutput, nil
+	}
+
+	output := make(map[string]any, len(leafOutputs))
+	for taskName, leafOutput := range leafOutputs {
+		output[taskName] = leafOutput
+	}
+	return output, nil
 }

@@ -78,6 +78,7 @@ type WorkflowRun struct {
 	WorkflowID        string
 	Status            string
 	Input             map[string]any
+	Output            map[string]any
 	IdempotencyReused bool
 }
 

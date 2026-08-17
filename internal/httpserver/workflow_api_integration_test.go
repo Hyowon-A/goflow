@@ -788,6 +788,9 @@ func TestWorkflowRunInspectionAPI(t *testing.T) {
 		expectFieldEquals(t, body, "id", workflowRunID)
 		expectFieldEquals(t, body, "workflow_id", workflowID)
 		expectFieldEquals(t, body, "status", "completed")
+		if !reflect.DeepEqual(expectObject(t, body["output"]), map[string]any{"ok": true}) {
+			t.Fatalf("expected workflow output, got %#v", body["output"])
+		}
 	})
 
 	t.Run("failed workflow run details", func(t *testing.T) {

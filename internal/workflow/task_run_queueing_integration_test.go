@@ -127,6 +127,119 @@ func TestPostgresRepositoryQueueRunnableTaskRunsHandlesFanOutAndFanIn(t *testing
 	assertWorkflowRunOutboxEventCount(t, pool, fixture.workflowRunID, 3)
 }
 
+func TestPostgresRepositoryQueueRunnableTaskRunsStoresPredecessorInput(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableDAG(t, pool)
+	repo := NewPostgresRepository(pool)
+	workflowInput := map[string]any{"document_text": "lecture notes"}
+	predecessorOutput := map[string]any{"clean_text": "lecture notes"}
+	setWorkflowRunInput(t, pool, fixture.workflowRunID, workflowInput)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["A"], predecessorOutput)
+
+	queued, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err != nil {
+		t.Fatalf("queue runnable task runs: %v", err)
+	}
+	want := []string{fixture.taskIDs["B"], fixture.taskIDs["C"]}
+	sort.Strings(want)
+	if got := taskIDs(queued); !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected B and C to queue, got %#v", got)
+	}
+
+	inputs := taskRunInputsByTaskName(t, pool, fixture.workflowRunID)
+	for _, taskName := range []string{"B", "C"} {
+		assertSuccessorInput(t, inputs[taskName], workflowInput, map[string]any{"A": predecessorOutput})
+	}
+}
+
+func TestPostgresRepositoryQueueRunnableTaskRunsStoresFanInPredecessorInputs(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableDAG(t, pool)
+	repo := NewPostgresRepository(pool)
+	workflowInput := map[string]any{"document_text": "lecture notes"}
+	outputB := map[string]any{"mcqs": "raw"}
+	outputC := map[string]any{"flashcards": "raw"}
+	setWorkflowRunInput(t, pool, fixture.workflowRunID, workflowInput)
+	setTaskRunStatus(t, pool, fixture.workflowRunID, fixture.taskIDs["B"], TaskRunStatusCompleted)
+	setTaskRunStatus(t, pool, fixture.workflowRunID, fixture.taskIDs["C"], TaskRunStatusCompleted)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["B"], outputB)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["C"], outputC)
+
+	queued, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err != nil {
+		t.Fatalf("queue runnable task runs: %v", err)
+	}
+	if got := taskIDs(queued); !reflect.DeepEqual(got, []string{fixture.taskIDs["D"]}) {
+		t.Fatalf("expected D to queue, got %#v", got)
+	}
+
+	inputs := taskRunInputsByTaskName(t, pool, fixture.workflowRunID)
+	assertSuccessorInput(t, inputs["D"], workflowInput, map[string]any{
+		"B": outputB,
+		"C": outputC,
+	})
+}
+
+func TestPostgresRepositoryQueueRunnableTaskRunsIgnoresUnrelatedWorkflowRunOutputs(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableDAG(t, pool)
+	repo := NewPostgresRepository(pool)
+	workflowInput := map[string]any{"document_text": "lecture notes"}
+	currentOutput := map[string]any{"mcqs": "current"}
+	unrelatedOutput := map[string]any{"mcqs": "unrelated"}
+	setWorkflowRunInput(t, pool, fixture.workflowRunID, workflowInput)
+	setTaskRunStatus(t, pool, fixture.workflowRunID, fixture.taskIDs["B"], TaskRunStatusCompleted)
+	setTaskRunStatus(t, pool, fixture.workflowRunID, fixture.taskIDs["C"], TaskRunStatusCompleted)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["B"], currentOutput)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["C"], map[string]any{"flashcards": "current"})
+	insertOtherWorkflowRunTaskOutput(t, pool, fixture.workflowID, fixture.taskIDs["B"], unrelatedOutput)
+
+	if _, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID); err != nil {
+		t.Fatalf("queue runnable task runs: %v", err)
+	}
+
+	inputs := taskRunInputsByTaskName(t, pool, fixture.workflowRunID)
+	predecessors, ok := inputs["D"]["predecessors"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected predecessor map, got %#v", inputs["D"]["predecessors"])
+	}
+	if !reflect.DeepEqual(predecessors["B"], currentOutput) {
+		t.Fatalf("expected current run output, got %#v", predecessors["B"])
+	}
+	if reflect.DeepEqual(predecessors["B"], unrelatedOutput) {
+		t.Fatalf("included unrelated output: %#v", predecessors["B"])
+	}
+}
+
+func TestPostgresRepositoryQueueRunnableTaskRunsDoesNotRewriteQueuedSuccessorInput(t *testing.T) {
+	pool := workflowClaimTestPool(t)
+	fixture := seedRunnableDAG(t, pool)
+	repo := NewPostgresRepository(pool)
+	workflowInput := map[string]any{"document_text": "lecture notes"}
+	firstOutput := map[string]any{"clean_text": "first"}
+	secondOutput := map[string]any{"clean_text": "second"}
+	setWorkflowRunInput(t, pool, fixture.workflowRunID, workflowInput)
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["A"], firstOutput)
+
+	if _, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID); err != nil {
+		t.Fatalf("queue runnable task runs: %v", err)
+	}
+	before := taskRunInputsByTaskName(t, pool, fixture.workflowRunID)["B"]
+
+	setTaskRunOutput(t, pool, fixture.workflowRunID, fixture.taskIDs["A"], secondOutput)
+	queuedAgain, err := repo.QueueRunnableTaskRuns(context.Background(), fixture.workflowRunID)
+	if err != nil {
+		t.Fatalf("queue runnable task runs again: %v", err)
+	}
+	if len(queuedAgain) != 0 {
+		t.Fatalf("expected no duplicate queueing, got %#v", queuedAgain)
+	}
+	after := taskRunInputsByTaskName(t, pool, fixture.workflowRunID)["B"]
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("expected queued input to stay unchanged:\n before %#v\n after  %#v", before, after)
+	}
+}
+
 func TestPostgresRepositoryQueueRunnableTaskRunsConcurrentCallsQueueEachTaskOnce(t *testing.T) {
 	pool := workflowClaimTestPool(t)
 	fixture := seedRunnableRoots(t, pool, 2)
@@ -455,6 +568,65 @@ func setTaskRunStatus(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID st
 	`, workflowRunID, taskID, status)
 	if err != nil {
 		t.Fatalf("set task run status: %v", err)
+	}
+}
+
+func setWorkflowRunInput(t *testing.T, pool *pgxpool.Pool, workflowRunID string, input map[string]any) {
+	t.Helper()
+
+	_, err := pool.Exec(context.Background(), `
+		UPDATE workflow_runs
+		SET input = $2
+		WHERE id = $1
+	`, workflowRunID, input)
+	if err != nil {
+		t.Fatalf("set workflow run input: %v", err)
+	}
+}
+
+func setTaskRunOutput(t *testing.T, pool *pgxpool.Pool, workflowRunID, taskID string, output map[string]any) {
+	t.Helper()
+
+	_, err := pool.Exec(context.Background(), `
+		UPDATE task_runs
+		SET output = $3
+		WHERE workflow_run_id = $1
+			AND task_id = $2
+	`, workflowRunID, taskID, output)
+	if err != nil {
+		t.Fatalf("set task run output: %v", err)
+	}
+}
+
+func insertOtherWorkflowRunTaskOutput(t *testing.T, pool *pgxpool.Pool, workflowID, taskID string, output map[string]any) {
+	t.Helper()
+
+	workflowRunID := uuid.NewString()
+	taskRunID := uuid.NewString()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO workflow_runs (id, workflow_id, status)
+		VALUES ($1, $2, $3)
+	`, workflowRunID, workflowID, WorkflowRunStatusRunning)
+	if err != nil {
+		t.Fatalf("insert other workflow run: %v", err)
+	}
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO task_runs (id, workflow_id, workflow_run_id, task_id, status, output)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, taskRunID, workflowID, workflowRunID, taskID, TaskRunStatusCompleted, output)
+	if err != nil {
+		t.Fatalf("insert other task run output: %v", err)
+	}
+}
+
+func assertSuccessorInput(t *testing.T, got, wantWorkflowInput map[string]any, wantPredecessors map[string]any) {
+	t.Helper()
+
+	if !reflect.DeepEqual(got["workflow_input"], wantWorkflowInput) {
+		t.Fatalf("unexpected workflow input: got %#v, want %#v", got["workflow_input"], wantWorkflowInput)
+	}
+	if !reflect.DeepEqual(got["predecessors"], wantPredecessors) {
+		t.Fatalf("unexpected predecessor input: got %#v, want %#v", got["predecessors"], wantPredecessors)
 	}
 }
 

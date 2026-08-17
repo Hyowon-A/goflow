@@ -62,6 +62,7 @@ type workflowRunResponse struct {
 	WorkflowID string         `json:"workflow_id"`
 	Status     string         `json:"status"`
 	Input      map[string]any `json:"input,omitempty"`
+	Output     map[string]any `json:"output,omitempty"`
 }
 
 type taskRunResponse struct {
@@ -275,6 +276,7 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		WorkflowID: workflowRun.WorkflowID,
 		Status:     workflowRun.Status,
 		Input:      workflowRun.Input,
+		Output:     workflowRun.Output,
 	})
 }
 
@@ -297,6 +299,7 @@ func (s *Server) getWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		WorkflowID: workflowRun.WorkflowID,
 		Status:     workflowRun.Status,
 		Input:      workflowRun.Input,
+		Output:     workflowRun.Output,
 	})
 }
 
