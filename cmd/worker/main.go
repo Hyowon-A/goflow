@@ -12,6 +12,7 @@ import (
 	"github.com/Hyowon-A/goflow/internal/config"
 	"github.com/Hyowon-A/goflow/internal/database"
 	"github.com/Hyowon-A/goflow/internal/queue"
+	"github.com/Hyowon-A/goflow/internal/recallify"
 	"github.com/Hyowon-A/goflow/internal/scheduler"
 	"github.com/Hyowon-A/goflow/internal/worker"
 	"github.com/Hyowon-A/goflow/internal/workflow"
@@ -72,11 +73,6 @@ func run() error {
 	outboxDispatcher := scheduler.NewOutboxDispatcher(repo, publisher)
 	schedulerService := scheduler.NewService(repo, publisher)
 
-	executors := worker.NewExecutorRegistry(map[string]worker.Executor{
-		worker.ExecutorTypeSleep:      worker.SleepExecutor{},
-		worker.ExecutorTypeLog:        worker.NewLogExecutor(log.Default()),
-		worker.ExecutorTypeRandomFail: worker.NewRandomFailExecutor(nil),
-	})
 	service := worker.NewService(
 		worker.ServiceConfig{
 			WorkerID:          cfg.WorkerID,
@@ -86,7 +82,7 @@ func run() error {
 		redisConsumer,
 		repo,
 		repo,
-		executors,
+		newExecutorRegistry(),
 		schedulerService,
 	)
 	outboxTicker := time.NewTicker(cfg.QueueBlockTimeout)
@@ -140,4 +136,18 @@ func run() error {
 	log.Printf("GoFlow worker stopped gracefully id=%s", cfg.WorkerID)
 
 	return nil
+}
+
+func newExecutorRegistry() worker.ExecutorRegistry {
+	return worker.NewExecutorRegistry(map[string]worker.Executor{
+		worker.ExecutorTypeSleep:              worker.SleepExecutor{},
+		worker.ExecutorTypeLog:                worker.NewLogExecutor(log.Default()),
+		worker.ExecutorTypeRandomFail:         worker.NewRandomFailExecutor(nil),
+		recallify.ExecutorTypeValidateRequest: recallify.RecallifyValidateRequestExecutor{},
+		recallify.ExecutorTypeCleanText:       recallify.RecallifyCleanTextExecutor{},
+		recallify.ExecutorTypeGenerateMCQs:    recallify.NewRecallifyGenerateMCQsExecutor(recallify.RecallifyClient{}),
+		recallify.ExecutorTypeValidateMCQs:    recallify.RecallifyValidateMCQsExecutor{},
+		recallify.ExecutorTypeMergeStudySet:   recallify.RecallifyMergeStudySetExecutor{},
+		recallify.ExecutorTypeNotifyCallback:  recallify.RecallifyNotifyCallbackExecutor{},
+	})
 }
