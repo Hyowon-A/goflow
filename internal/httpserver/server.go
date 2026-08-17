@@ -85,6 +85,8 @@ func (s *Server) registerRoutes() {
 	s.router.Get("/ready", s.readiness)
 	s.router.Get("/metrics", s.metrics)
 
+	s.router.Post("/demos/recallify/runs", s.createRecallifyDemoRun)
+
 	s.router.Post("/workflows", s.createWorkflow)
 	s.router.Post("/workflows/{workflowID}/tasks", s.createTask)
 	s.router.Post("/workflows/{workflowID}/dependencies", s.createDependency)
