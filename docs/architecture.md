@@ -189,7 +189,7 @@ Implemented API endpoints:
 | `POST` | `/workflows/{workflowID}/tasks` | Create a task definition inside one workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Create a dependency edge between two tasks. |
 | `POST` | `/workflows/{workflowID}/runs` | Create a workflow run and pending task runs transactionally. |
-| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Read workflow-run status and input. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Read workflow-run status, input and output. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs` | List task-run statuses for one workflow run. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts` | List task attempts and failure reasons. |
 | `GET` | `/health` | Return API liveness. |
@@ -232,6 +232,40 @@ Logs use structured fields for request IDs, workflow IDs, task-run IDs,
 attempt IDs, worker IDs, Redis message IDs, outbox event IDs and stable
 reasons. Workflow input, task config, task output and idempotency request
 hashes are not logged.
+
+`cmd/incidentreport` provides a read-only operational view for one workflow run.
+It joins PostgreSQL workflow, task-run and latest-attempt state, counts pending
+outbox events for that run, checks the configured Redis consumer-group backlog
+and optionally fetches the API metrics endpoint. PostgreSQL remains the primary
+evidence source; unavailable Redis or metrics endpoints are reported instead of
+being treated as proof of a root cause. Suggested checks are generated only
+from observed statuses, failure reasons or non-zero backlog counts.
+
+## Recallify Product Workflow
+
+The Week 4 product workflow uses the generic workflow, scheduler and worker
+paths. `internal/recallify` owns the input contract, HTTP client, validation,
+executors and shared workflow template. `cmd/recallify`, `cmd/worker` and the
+HTTP demo only wire that package into existing services. Product-specific
+behavior is limited to six registered executor types:
+
+```mermaid
+flowchart LR
+    Input[workflow run input] --> Validate[validate_request]
+    Validate --> Clean[clean_text]
+    Clean --> Generate[generate_mcqs]
+    Generate --> ValidateMCQ[validate_mcqs]
+    ValidateMCQ --> Merge[merge_study_set]
+    Merge --> Callback[notify_callback]
+    Callback --> Output[workflow run output]
+```
+
+Root task runs receive workflow input. Each successor receives the original
+workflow input plus predecessor outputs keyed by task name. This data flow is
+implemented in the shared PostgreSQL scheduler path, not in a Recallify-only
+scheduler. Generation calls the Recallify HTTP boundary; validation and merge
+remain deterministic worker executors. The callback is skipped when no URL is
+provided.
 
 ## Task Queue
 

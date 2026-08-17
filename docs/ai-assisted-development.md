@@ -39,6 +39,157 @@ All architectural decisions, code changes and reliability claims are reviewed an
 - Ran `go test ./...`
 - Verified database connectivity during API startup
 
+## Day 16
+
+### AI-assisted work
+
+- Added workflow-run input propagation to root tasks and predecessor-output
+  propagation to successors.
+- Exposed and finalized workflow-run output from leaf task outputs.
+- Defined the six-task Recallify workflow and its normalized input contract.
+
+### Accepted suggestions
+
+- Reused PostgreSQL JSON columns and the shared scheduler transaction instead
+  of adding product-specific storage or scheduling.
+- Kept conditional task-run queueing as the concurrency boundary.
+
+### Modified suggestions
+
+- Kept the Recallify template in runnable command and demo code rather than
+  adding persistent template tables.
+
+### Rejected suggestions
+
+- Rejected authentication, file upload, artifact storage and a general executor
+  plugin system for the Week 4 demo.
+
+### Validation performed
+
+- Added PostgreSQL integration coverage for root input, successor input,
+  idempotent queueing and workflow output.
+
+## Day 17
+
+### AI-assisted work
+
+- Added Recallify input validation, text preparation, HTTP generation client
+  and generation executor.
+- Registered Recallify executors in the worker command without requiring a
+  backend URL at worker startup.
+
+### Accepted suggestions
+
+- Used stdlib string and HTTP handling behind the existing executor boundary.
+- Classified transient HTTP and timeout failures separately from permanent
+  configuration and response failures.
+
+### Modified suggestions
+
+- Used task configuration for the Recallify base URL and optional bearer token
+  so the default worker process remains backend-agnostic.
+
+### Rejected suggestions
+
+- Rejected logging prompts, document text, generated answers or credentials.
+
+### Validation performed
+
+- Added unit tests for normalization, text limits, request shape, cancellation,
+  status classification and executor registration.
+
+## Day 18
+
+### AI-assisted work
+
+- Added strict MCQ validation, deterministic study-set merge and end-to-end
+  executor integration coverage.
+
+### Accepted suggestions
+
+- Required exact item counts, four unique options, valid answers and unique
+  question stems before model output can be treated as successful.
+
+### Modified suggestions
+
+- Kept validation failures non-retryable; generation retries remain responsible
+  for transient backend failures.
+
+### Rejected suggestions
+
+- Rejected schema libraries and model-assisted repair because the current JSON
+  contract is small and deterministic.
+
+### Validation performed
+
+- Added valid, malformed, duplicate and missing-field validation tests plus a
+  PostgreSQL-backed full workflow test.
+
+## Day 19
+
+### AI-assisted work
+
+- Added `cmd/recallify` with deterministic fake generation, configurable run and
+  worker counts, fixed fixture loading and a compact evaluation summary.
+
+### Accepted suggestions
+
+- Reused existing scheduler, worker and repository services in process.
+- Kept evaluation output on stdout and used existing database state rather than
+  adding an evaluation table.
+
+### Modified suggestions
+
+- Added one representative repository fixture instead of maintaining multiple
+  fixtures before the evaluation needs topic comparison.
+
+### Rejected suggestions
+
+- Rejected automated real Gemini calls in normal tests and JSON report output
+  without a current consumer.
+
+### Validation performed
+
+- Added tests for flags, fixture loading, template shape, run creation,
+  percentile calculation, summary rendering and invariants.
+
+## Day 20
+
+### AI-assisted work
+
+- Added optional callback execution and the Recallify API demo route.
+- Moved Recallify feature code into `internal/recallify` and replaced duplicate
+  CLI/API task graphs with one shared template.
+- Added `cmd/incidentreport` for workflow status, failed task attempts,
+  run-scoped outbox state, Redis backlog and optional metrics evidence.
+- Documented deterministic and real-backend Recallify operation, incident
+  inspection, architecture and test coverage.
+- Removed hard-coded login defaults from the real-backend example script.
+
+### Accepted suggestions
+
+- Kept incident reporting deterministic and evidence-based without an LLM.
+- Treated PostgreSQL as primary evidence and reported unavailable Redis or
+  metrics data without discarding the database report.
+- Emitted suggested checks only for observed task failures, non-zero backlogs or
+  non-terminal workflow status.
+
+### Modified suggestions
+
+- Used a read-only CLI instead of adding another API endpoint.
+- Reported the configured Redis consumer-group pending count as contextual
+  queue evidence; PostgreSQL outbox counts remain scoped to the requested run.
+
+### Rejected suggestions
+
+- Rejected inferred root causes, payload inspection and storage of incident
+  reports.
+
+### Validation performed
+
+- Added focused tests for failure evidence, completed runs, missing runs,
+  metrics filtering and metrics errors.
+
 ## Day 2
 
 ### AI-assisted work

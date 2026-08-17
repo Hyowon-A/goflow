@@ -8,6 +8,32 @@ services and local `.env.example` defaults: PostgreSQL on port `5433`, Redis on
 port `6379`, API on port `8081`, stream `goflow:tasks` and consumer group
 `goflow-workers`.
 
+## Workflow Incident Report
+
+Use the incident-report command when a workflow run is stuck or failed:
+
+```sh
+go run ./cmd/incidentreport -run <workflow-run-id>
+```
+
+Add the API metrics endpoint when it is available:
+
+```sh
+go run ./cmd/incidentreport -run <workflow-run-id> \
+  -metrics-url http://localhost:8081/metrics
+```
+
+The report reads the workflow status, failed and dead-letter task runs, latest
+attempt failure reasons and run-scoped pending outbox count from PostgreSQL. It
+also reports pending entries for the configured Redis stream and consumer group
+and includes GoFlow metric samples when `-metrics-url` is set. Redis or metrics
+failures are shown as unavailable without hiding the PostgreSQL evidence.
+
+Recommendations cite the observed task status, failure reason or backlog count.
+A completed run with no failed tasks produces no incident recommendation. The
+command does not call an LLM and does not inspect workflow input or output
+payloads.
+
 ## Failure Injection
 
 These checks are manual because they stop local services or require timing

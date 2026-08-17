@@ -33,6 +33,8 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Structured request, idempotency, scheduler and duplicate-message logging
 - Prometheus-style API metrics at `GET /metrics`
 - Local load-check command for a repeatable `A -> B, C -> D` workflow
+- Recallify workflow demo with deterministic and real-backend generation modes
+- Evidence-based incident report CLI for workflow runs
 - Operations checks for Redis outages, stopped workers, duplicates and retry
   exhaustion
 - Graceful shutdown on `Ctrl+C` and `SIGTERM`
@@ -171,7 +173,9 @@ Schema files:
 ```text
 cmd/
   api/
+  incidentreport/
   loadcheck/
+  recallify/
   worker/
 
 internal/
@@ -180,6 +184,7 @@ internal/
   httpserver/
   metrics/
   queue/
+  recallify/
   scheduler/
   worker/
   workflow/
@@ -233,6 +238,20 @@ prints workflow completions, failures, attempts, retries, dead letters and
 outbox backlog. It uses a dedicated Redis stream based on `QUEUE_STREAM_NAME`
 unless `-stream` is provided.
 
+Run the deterministic Recallify workflow:
+
+```sh
+go run ./cmd/recallify -runs 2 -workers 2 -timeout 90s
+```
+
+Inspect a workflow run using PostgreSQL evidence plus optional Redis and API
+metrics context:
+
+```sh
+go run ./cmd/incidentreport -run <workflow-run-id> \
+  -metrics-url http://localhost:8081/metrics
+```
+
 ## Configuration
 
 The API loads configuration from the environment. During local development,
@@ -268,9 +287,10 @@ which overrides the code default during local development.
 | `POST` | `/workflows/{workflowID}/tasks` | Creates a task definition inside a workflow. |
 | `POST` | `/workflows/{workflowID}/dependencies` | Creates a dependency between two tasks in a workflow. |
 | `POST` | `/workflows/{workflowID}/runs` | Creates a workflow run and one pending task run per task. |
-| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Gets workflow-run status and input. |
+| `GET` | `/workflows/{workflowID}/runs/{workflowRunID}` | Gets workflow-run status, input and output. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs` | Lists task runs for a workflow run. |
 | `GET` | `/workflows/{workflowID}/runs/{workflowRunID}/task-runs/{taskRunID}/attempts` | Lists attempts and failure reasons for a task run. |
+| `POST` | `/demos/recallify/runs` | Creates and queues a Recallify demo workflow against a supplied backend URL. |
 
 Example local workflow run:
 
@@ -324,6 +344,7 @@ does not expose its own HTTP metrics endpoint yet.
 - [Architecture](docs/architecture.md)
 - [Failure model](docs/failure-model.md)
 - [Operations checks](docs/operations.md)
+- [Recallify workflow](docs/recallify-workflow.md)
 - [Test strategy](docs/test-strategy.md)
 - [AI-assisted development](docs/ai-assisted-development.md)
 - [ADR-002: Use Redis Streams for the Initial Task Queue](docs/adr/ADR-002-redis-streams-task-queue.md)

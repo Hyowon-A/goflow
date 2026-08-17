@@ -82,6 +82,19 @@ for recovered queued work, and claiming recovered tasks by a different worker.
 Load-check tests cover flag validation, summary rendering and invariant checks
 without requiring PostgreSQL or Redis.
 
+`internal/recallify` tests cover input normalization, text limits, HTTP
+generation failure classification, MCQ structure validation, deterministic
+merge output, callback payload safety and the shared workflow template. Command
+tests cover executor registration and local summary invariants. PostgreSQL
+integration tests prove root workflow input, predecessor output propagation and
+final workflow output.
+
+Incident-report tests use a small evidence-source fake and in-memory HTTP
+transport. They prove that failed task reasons and backlog evidence appear in
+the report, completed runs do not produce fake incidents, missing runs return a
+clear error, and only GoFlow metric samples are included. PostgreSQL and Redis
+connectivity remain runtime checks rather than unit-test requirements.
+
 ## Current Coverage
 
 - `GET /health`
@@ -149,6 +162,8 @@ without requiring PostgreSQL or Redis.
   expired leases
 - Payload-safe structured logs for duplicate and failure paths
 - Local load-check summary and invariant logic
+- Recallify workflow input, generation, validation, merge, callback and summary
+- Incident report evidence rendering, missing-run handling and metrics filtering
 
 ## Validation Commands
 
@@ -198,6 +213,12 @@ Run the load-check unit tests:
 
 ```sh
 go test ./cmd/loadcheck -v
+```
+
+Run the Recallify and incident-report command tests:
+
+```sh
+go test ./internal/recallify ./cmd/recallify ./cmd/incidentreport -v
 ```
 
 Run the retry-focused packages:
