@@ -45,6 +45,9 @@ type recallifyConfig struct {
 	stream       string
 	recallifyURL string
 	fixture      string
+	jsonOutput   bool
+	output       string
+	tag          string
 }
 
 type workflowCreator interface {
@@ -78,6 +81,10 @@ func run(args []string, out io.Writer) error {
 	}
 	if recallifyCfg.stream == "" {
 		recallifyCfg.stream = cfg.QueueStreamName + ":recallify"
+	}
+	generationMode := "recallify_backend"
+	if strings.TrimSpace(recallifyCfg.recallifyURL) == "" {
+		generationMode = "fake"
 	}
 
 	fixtureText, err := loadRecallifyFixture(recallifyCfg.fixture)
@@ -146,15 +153,28 @@ func run(args []string, out io.Writer) error {
 
 	template := recallify.NewTemplate(recallifyCfg.recallifyURL, "")
 	summary, err := waitForRecallifySummary(ctx, db, created.ID, len(runIDs), len(tasks), len(template.Dependencies), startedAt)
+	summary.Tag = recallifyCfg.tag
+	summary.RunsRequested = recallifyCfg.runs
+	summary.WorkersRequested = recallifyCfg.workers
+	summary.GenerationMode = generationMode
+	summary.Fixture = filepath.Base(recallifyCfg.fixture)
+	if summary.Fixture == "" {
+		summary.Fixture = filepath.Base(defaultRecallifyFixturePath)
+	}
 	if err != nil {
-		_ = renderRecallifySummary(out, summary)
+		_ = renderRecallifySummary(out, summary, recallifyCfg.jsonOutput)
+		_ = writeRecallifySummaryOutput(recallifyCfg.output, summary)
 		return err
 	}
 	if err := checkRecallifyInvariants(summary, recallifyCfg.runs); err != nil {
-		_ = renderRecallifySummary(out, summary)
+		_ = renderRecallifySummary(out, summary, recallifyCfg.jsonOutput)
+		_ = writeRecallifySummaryOutput(recallifyCfg.output, summary)
 		return err
 	}
-	return renderRecallifySummary(out, summary)
+	if err := renderRecallifySummary(out, summary, recallifyCfg.jsonOutput); err != nil {
+		return err
+	}
+	return writeRecallifySummaryOutput(recallifyCfg.output, summary)
 }
 
 func parseFlags(args []string) (recallifyConfig, error) {
@@ -168,6 +188,9 @@ func parseFlags(args []string) (recallifyConfig, error) {
 	flags.StringVar(&recallifyCfg.stream, "stream", "", "Redis stream override")
 	flags.StringVar(&recallifyCfg.recallifyURL, "recallify-url", "", "Recallify backend URL; empty uses deterministic fake generation")
 	flags.StringVar(&recallifyCfg.fixture, "fixture", "", "path to a text fixture")
+	flags.BoolVar(&recallifyCfg.jsonOutput, "json", false, "print JSON summary")
+	flags.StringVar(&recallifyCfg.output, "output", "", "write summary JSON to file")
+	flags.StringVar(&recallifyCfg.tag, "tag", "", "benchmark tag")
 
 	if err := flags.Parse(args); err != nil {
 		return recallifyConfig{}, err

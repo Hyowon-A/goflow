@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,11 +25,14 @@ func TestParseFlags(t *testing.T) {
 		"-stream", "custom",
 		"-recallify-url", "http://localhost:8080",
 		"-fixture", "notes.txt",
+		"-json",
+		"-output", "summary.json",
+		"-tag", "baseline",
 	})
 	if err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
-	if cfg.runs != 4 || cfg.workers != 3 || cfg.timeout != 5*time.Second || cfg.stream != "custom" || cfg.recallifyURL != "http://localhost:8080" || cfg.fixture != "notes.txt" {
+	if cfg.runs != 4 || cfg.workers != 3 || cfg.timeout != 5*time.Second || cfg.stream != "custom" || cfg.recallifyURL != "http://localhost:8080" || cfg.fixture != "notes.txt" || !cfg.jsonOutput || cfg.output != "summary.json" || cfg.tag != "baseline" {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 
@@ -159,6 +163,16 @@ func TestCheckRecallifyInvariants(t *testing.T) {
 	if err := checkRecallifyInvariants(summary, 2); err == nil {
 		t.Fatal("expected failed workflow invariant error")
 	}
+
+	summary = recallifySummary{
+		WorkflowRunsStarted:   2,
+		WorkflowRunsCompleted: 2,
+		MCQValidationPasses:   1,
+		TaskAttempts:          10,
+	}
+	if err := checkRecallifyInvariants(summary, 2); err == nil || !strings.Contains(err.Error(), "MCQ validation passes") {
+		t.Fatalf("expected validation count error, got %v", err)
+	}
 }
 
 func TestPercentileDuration(t *testing.T) {
@@ -192,7 +206,7 @@ func TestRenderRecallifySummary(t *testing.T) {
 		P50WorkflowDuration:   time.Second,
 		P95WorkflowDuration:   2 * time.Second,
 		Elapsed:               1500 * time.Millisecond,
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("render summary: %v", err)
 	}
@@ -214,6 +228,60 @@ elapsed: 1.5s
 `
 	if out.String() != want {
 		t.Fatalf("summary mismatch:\n got %q\nwant %q", out.String(), want)
+	}
+}
+
+func TestRenderRecallifyJSONSummary(t *testing.T) {
+	var out bytes.Buffer
+	err := renderRecallifySummary(&out, recallifySummary{
+		Tag:                   "baseline",
+		RunsRequested:         5,
+		WorkersRequested:      1,
+		WorkflowID:            "workflow-id",
+		Tasks:                 6,
+		Dependencies:          5,
+		WorkflowRunsStarted:   5,
+		WorkflowRunsCompleted: 5,
+		MCQValidationPasses:   5,
+		CallbackSkipped:       5,
+		GenerationMode:        "fake",
+		Fixture:               "go-notes.txt",
+		TaskAttempts:          30,
+		P50WorkflowDuration:   time.Second,
+		P95WorkflowDuration:   2 * time.Second,
+		Elapsed:               3 * time.Second,
+	}, true)
+	if err != nil {
+		t.Fatalf("render JSON summary: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("summary JSON is invalid: %v\n%s", err, out.String())
+	}
+	for key, want := range map[string]any{
+		"tag":                   "baseline",
+		"runs_requested":        float64(5),
+		"workers_requested":     float64(1),
+		"generation_mode":       "fake",
+		"fixture":               "go-notes.txt",
+		"mcq_validation_passes": float64(5),
+		"callback_skipped":      float64(5),
+		"p95_workflow_duration": float64(2 * time.Second),
+	} {
+		if got[key] != want {
+			t.Fatalf("expected %s=%#v, got %#v in %#v", key, want, got[key], got)
+		}
+	}
+}
+
+func TestWriteRecallifySummaryOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summary.json")
+	if err := writeRecallifySummaryOutput(path, recallifySummary{GenerationMode: "recallify_backend"}); err != nil {
+		t.Fatalf("write summary output: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat summary output: %v", err)
 	}
 }
 

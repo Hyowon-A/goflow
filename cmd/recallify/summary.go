@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"time"
 
@@ -13,20 +15,28 @@ import (
 )
 
 type recallifySummary struct {
-	WorkflowID            string
-	Tasks                 int
-	Dependencies          int
-	WorkflowRunsStarted   int64
-	WorkflowRunsCompleted int64
-	WorkflowRunsFailed    int64
-	MCQValidationPasses   int64
-	TaskAttempts          int64
-	Retries               int64
-	DeadLetters           int64
-	OutboxPending         int64
-	P50WorkflowDuration   time.Duration
-	P95WorkflowDuration   time.Duration
-	Elapsed               time.Duration
+	Tag                   string        `json:"tag"`
+	RunsRequested         int           `json:"runs_requested"`
+	WorkersRequested      int           `json:"workers_requested"`
+	WorkflowID            string        `json:"workflow_id"`
+	Tasks                 int           `json:"tasks"`
+	Dependencies          int           `json:"dependencies"`
+	WorkflowRunsStarted   int64         `json:"workflow_runs_started"`
+	WorkflowRunsCompleted int64         `json:"workflow_runs_completed"`
+	WorkflowRunsFailed    int64         `json:"workflow_runs_failed"`
+	MCQValidationPasses   int64         `json:"mcq_validation_passes"`
+	CallbackSkipped       int64         `json:"callback_skipped"`
+	CallbackSent          int64         `json:"callback_sent"`
+	CallbackFailed        int64         `json:"callback_failed"`
+	GenerationMode        string        `json:"generation_mode"`
+	Fixture               string        `json:"fixture"`
+	TaskAttempts          int64         `json:"task_attempts"`
+	Retries               int64         `json:"retries"`
+	DeadLetters           int64         `json:"dead_letters"`
+	OutboxPending         int64         `json:"outbox_pending"`
+	P50WorkflowDuration   time.Duration `json:"p50_workflow_duration"`
+	P95WorkflowDuration   time.Duration `json:"p95_workflow_duration"`
+	Elapsed               time.Duration `json:"elapsed"`
 }
 
 func waitForRecallifySummary(ctx context.Context, db *pgxpool.Pool, workflowID string, runs int, tasks int, dependencies int, startedAt time.Time) (recallifySummary, error) {
@@ -102,6 +112,20 @@ func loadRecallifySummary(ctx context.Context, db *pgxpool.Pool, workflowID stri
 	`, workflowID).Scan(&summary.MCQValidationPasses)
 	if err != nil {
 		return recallifySummary{}, fmt.Errorf("summarize recallify validation passes: %w", err)
+	}
+
+	err = db.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE (tr.output->>'skipped')::boolean IS TRUE),
+			COUNT(*) FILTER (WHERE (tr.output->>'posted')::boolean IS TRUE),
+			COUNT(*) FILTER (WHERE tr.status IN ('failed', 'dead_letter'))
+		FROM task_runs tr
+		JOIN tasks t ON t.id = tr.task_id
+		WHERE tr.workflow_id = $1
+			AND t.name = 'notify_callback'
+	`, workflowID).Scan(&summary.CallbackSkipped, &summary.CallbackSent, &summary.CallbackFailed)
+	if err != nil {
+		return recallifySummary{}, fmt.Errorf("summarize recallify callbacks: %w", err)
 	}
 
 	durations, err := loadRecallifyWorkflowDurations(ctx, db, workflowID)
@@ -191,7 +215,12 @@ func checkRecallifyInvariants(summary recallifySummary, wantRuns int) error {
 	return nil
 }
 
-func renderRecallifySummary(w io.Writer, summary recallifySummary) error {
+func renderRecallifySummary(w io.Writer, summary recallifySummary, jsonOutput bool) error {
+	if jsonOutput {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(summary)
+	}
 	_, err := fmt.Fprintf(w, `workflow: %s
 tasks: %d
 dependencies: %d
@@ -223,4 +252,19 @@ elapsed: %s
 		summary.Elapsed.Round(time.Millisecond),
 	)
 	return err
+}
+
+func writeRecallifySummaryOutput(path string, summary recallifySummary) error {
+	if path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write recallify summary output %s: %w", path, err)
+	}
+	return nil
 }
