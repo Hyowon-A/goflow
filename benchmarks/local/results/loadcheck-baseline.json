@@ -1,0 +1,15 @@
+{
+  "tag": "local-baseline-loadcheck",
+  "runs_requested": 25,
+  "workers_requested": 1,
+  "workflow_runs_started": 25,
+  "workflow_runs_completed": 25,
+  "workflow_runs_failed": 0,
+  "task_attempts": 100,
+  "retries": 0,
+  "dead_letters": 0,
+  "outbox_pending": 0,
+  "p50_workflow_duration": 1163475000,
+  "p95_workflow_duration": 1205703000,
+  "elapsed": 1570595125
+}

@@ -180,6 +180,8 @@ func TestParseFlagsRejectsInvalidValues(t *testing.T) {
 		{"-runs", "0"},
 		{"-workers", "0"},
 		{"-timeout", "0s"},
+		{"-failure-probability", "-0.1"},
+		{"-failure-probability", "1.1"},
 	} {
 		if _, err := parseFlags(args); err == nil {
 			t.Fatalf("expected parse error for args %#v", args)
@@ -188,11 +190,11 @@ func TestParseFlagsRejectsInvalidValues(t *testing.T) {
 }
 
 func TestParseFlagsAcceptsBenchmarkOutputFlags(t *testing.T) {
-	cfg, err := parseFlags([]string{"-json", "-output", "out.json", "-tag", "baseline"})
+	cfg, err := parseFlags([]string{"-json", "-output", "out.json", "-tag", "baseline", "-failure-probability", "0"})
 	if err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
-	if !cfg.jsonOutput || cfg.output != "out.json" || cfg.tag != "baseline" {
+	if !cfg.jsonOutput || cfg.output != "out.json" || cfg.tag != "baseline" || cfg.failureProbability != 0 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 }

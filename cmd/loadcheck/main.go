@@ -24,13 +24,14 @@ import (
 )
 
 type loadConfig struct {
-	runs       int
-	workers    int
-	timeout    time.Duration
-	stream     string
-	jsonOutput bool
-	output     string
-	tag        string
+	runs               int
+	workers            int
+	timeout            time.Duration
+	stream             string
+	failureProbability float64
+	jsonOutput         bool
+	output             string
+	tag                string
 }
 
 type loadSummary struct {
@@ -103,7 +104,7 @@ func run(args []string, out io.Writer) error {
 	}()
 
 	startedAt := time.Now()
-	workflowID, runIDs, err := createLoadWorkflowRuns(ctx, repo, schedulerService, loadCfg.runs)
+	workflowID, runIDs, err := createLoadWorkflowRuns(ctx, repo, schedulerService, loadCfg)
 	if err != nil {
 		return err
 	}
@@ -145,6 +146,7 @@ func parseFlags(args []string) (loadConfig, error) {
 	flags.IntVar(&cfg.workers, "workers", 2, "in-process workers to run")
 	flags.DurationVar(&cfg.timeout, "timeout", 60*time.Second, "maximum time to wait")
 	flags.StringVar(&cfg.stream, "stream", "", "Redis stream override")
+	flags.Float64Var(&cfg.failureProbability, "failure-probability", 0.2, "random_fail task failure probability")
 	flags.BoolVar(&cfg.jsonOutput, "json", false, "print JSON summary")
 	flags.StringVar(&cfg.output, "output", "", "write summary JSON to file")
 	flags.StringVar(&cfg.tag, "tag", "", "benchmark tag")
@@ -161,10 +163,13 @@ func parseFlags(args []string) (loadConfig, error) {
 	if cfg.timeout <= 0 {
 		return loadConfig{}, errors.New("-timeout must be positive")
 	}
+	if cfg.failureProbability < 0 || cfg.failureProbability > 1 {
+		return loadConfig{}, errors.New("-failure-probability must be between 0 and 1")
+	}
 	return cfg, nil
 }
 
-func createLoadWorkflowRuns(ctx context.Context, repo *workflow.PostgresRepository, schedulerService *scheduler.Service, runs int) (string, []string, error) {
+func createLoadWorkflowRuns(ctx context.Context, repo *workflow.PostgresRepository, schedulerService *scheduler.Service, cfg loadConfig) (string, []string, error) {
 	service := workflow.NewService(repo)
 	created, err := service.CreateWorkflow(ctx, workflow.CreateWorkflowInput{
 		Name: fmt.Sprintf("loadcheck-%d", time.Now().UnixNano()),
@@ -178,7 +183,7 @@ func createLoadWorkflowRuns(ctx context.Context, repo *workflow.PostgresReposito
 		{Name: "A", ExecutorType: worker.ExecutorTypeLog, Config: map[string]any{"message": "loadcheck A"}},
 		{Name: "B", ExecutorType: worker.ExecutorTypeSleep, Config: map[string]any{"duration": "10ms"}},
 		{Name: "C", ExecutorType: worker.ExecutorTypeRandomFail, Config: map[string]any{
-			"failure_probability": 0.2,
+			"failure_probability": cfg.failureProbability,
 			"retry": map[string]any{
 				"max_attempts":  2,
 				"initial_delay": "10ms",
@@ -203,8 +208,8 @@ func createLoadWorkflowRuns(ctx context.Context, repo *workflow.PostgresReposito
 		}
 	}
 
-	runIDs := make([]string, 0, runs)
-	for i := 0; i < runs; i++ {
+	runIDs := make([]string, 0, cfg.runs)
+	for i := 0; i < cfg.runs; i++ {
 		run, err := service.CreateWorkflowRun(ctx, created.ID, workflow.CreateWorkflowRunInput{
 			Input: map[string]any{"loadcheck_run": i + 1},
 		})
@@ -370,11 +375,10 @@ func loadSummaryForWorkflow(ctx context.Context, db *pgxpool.Pool, workflowID st
 	var p50Seconds, p95Seconds float64
 	err = db.QueryRow(ctx, `
 		SELECT
-			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - started_at)::double precision), 0),
-			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - started_at)::double precision), 0)
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - created_at)::double precision), 0),
+			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - created_at)::double precision), 0)
 		FROM workflow_runs
 		WHERE workflow_id = $1
-			AND started_at IS NOT NULL
 			AND completed_at IS NOT NULL
 	`, workflowID).Scan(&p50Seconds, &p95Seconds)
 	if err != nil {

@@ -11,6 +11,15 @@ Keep this directory small:
 
 Planned result files live under `results/`.
 
+Run the baseline:
+
+```sh
+scripts/local_baseline.sh
+```
+
+The script starts PostgreSQL and Redis with Docker Compose, then stops them on
+exit.
+
 ## Durations
 
 Benchmark commands report p50 and p95 workflow durations from stored workflow
