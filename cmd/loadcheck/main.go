@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,21 +24,29 @@ import (
 )
 
 type loadConfig struct {
-	runs    int
-	workers int
-	timeout time.Duration
-	stream  string
+	runs       int
+	workers    int
+	timeout    time.Duration
+	stream     string
+	jsonOutput bool
+	output     string
+	tag        string
 }
 
 type loadSummary struct {
-	WorkflowRunsStarted   int64
-	WorkflowRunsCompleted int64
-	WorkflowRunsFailed    int64
-	TaskAttempts          int64
-	Retries               int64
-	DeadLetters           int64
-	OutboxPending         int64
-	Elapsed               time.Duration
+	Tag                   string        `json:"tag"`
+	RunsRequested         int           `json:"runs_requested"`
+	WorkersRequested      int           `json:"workers_requested"`
+	WorkflowRunsStarted   int64         `json:"workflow_runs_started"`
+	WorkflowRunsCompleted int64         `json:"workflow_runs_completed"`
+	WorkflowRunsFailed    int64         `json:"workflow_runs_failed"`
+	TaskAttempts          int64         `json:"task_attempts"`
+	Retries               int64         `json:"retries"`
+	DeadLetters           int64         `json:"dead_letters"`
+	OutboxPending         int64         `json:"outbox_pending"`
+	P50WorkflowDuration   time.Duration `json:"p50_workflow_duration"`
+	P95WorkflowDuration   time.Duration `json:"p95_workflow_duration"`
+	Elapsed               time.Duration `json:"elapsed"`
 }
 
 func main() {
@@ -104,18 +113,27 @@ func run(args []string, out io.Writer) error {
 	startWorkerLoops(ctx, &wg, cfg, consumers, repo, schedulerService)
 
 	summary, err := waitForSummary(ctx, db, workflowID, len(runIDs), startedAt)
+	summary.Tag = loadCfg.tag
+	summary.RunsRequested = loadCfg.runs
+	summary.WorkersRequested = loadCfg.workers
+
 	cancel()
 	wg.Wait()
 	if err != nil {
-		_ = renderSummary(out, summary)
+		_ = renderSummary(out, summary, loadCfg.jsonOutput)
+		_ = writeSummaryOutput(loadCfg.output, summary)
 		return err
 	}
 	if err := checkInvariants(summary, loadCfg.runs); err != nil {
-		_ = renderSummary(out, summary)
+		_ = renderSummary(out, summary, loadCfg.jsonOutput)
+		_ = writeSummaryOutput(loadCfg.output, summary)
 		return err
 	}
 
-	return renderSummary(out, summary)
+	if err := renderSummary(out, summary, loadCfg.jsonOutput); err != nil {
+		return err
+	}
+	return writeSummaryOutput(loadCfg.output, summary)
 }
 
 func parseFlags(args []string) (loadConfig, error) {
@@ -127,6 +145,9 @@ func parseFlags(args []string) (loadConfig, error) {
 	flags.IntVar(&cfg.workers, "workers", 2, "in-process workers to run")
 	flags.DurationVar(&cfg.timeout, "timeout", 60*time.Second, "maximum time to wait")
 	flags.StringVar(&cfg.stream, "stream", "", "Redis stream override")
+	flags.BoolVar(&cfg.jsonOutput, "json", false, "print JSON summary")
+	flags.StringVar(&cfg.output, "output", "", "write summary JSON to file")
+	flags.StringVar(&cfg.tag, "tag", "", "benchmark tag")
 
 	if err := flags.Parse(args); err != nil {
 		return loadConfig{}, err
@@ -346,6 +367,22 @@ func loadSummaryForWorkflow(ctx context.Context, db *pgxpool.Pool, workflowID st
 		return loadSummary{}, fmt.Errorf("summarize task outbox: %w", err)
 	}
 
+	var p50Seconds, p95Seconds float64
+	err = db.QueryRow(ctx, `
+		SELECT
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - started_at)::double precision), 0),
+			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM completed_at - started_at)::double precision), 0)
+		FROM workflow_runs
+		WHERE workflow_id = $1
+			AND started_at IS NOT NULL
+			AND completed_at IS NOT NULL
+	`, workflowID).Scan(&p50Seconds, &p95Seconds)
+	if err != nil {
+		return loadSummary{}, fmt.Errorf("summarize workflow durations: %w", err)
+	}
+	summary.P50WorkflowDuration = time.Duration(p50Seconds * float64(time.Second))
+	summary.P95WorkflowDuration = time.Duration(p95Seconds * float64(time.Second))
+
 	summary.Elapsed = time.Since(startedAt)
 	return summary, nil
 }
@@ -366,16 +403,21 @@ func checkInvariants(summary loadSummary, wantRuns int) error {
 	return nil
 }
 
-func renderSummary(w io.Writer, summary loadSummary) error {
-	_, err := fmt.Fprintf(w, `workflow runs started: %d
-workflow runs completed: %d
-workflow runs failed: %d
-task attempts: %d
-retries: %d
-dead letters: %d
-outbox pending: %d
-elapsed: %s
-`,
+func renderSummary(w io.Writer, summary loadSummary, jsonOutput bool) error {
+	if jsonOutput {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(summary)
+	}
+	_, err := fmt.Fprintf(w,
+		"workflow runs started: %d\n"+
+			"workflow runs completed: %d\n"+
+			"workflow runs failed: %d\n"+
+			"task attempts: %d\n"+
+			"retries: %d\n"+
+			"dead letters: %d\n"+
+			"outbox pending: %d\n"+
+			"elapsed: %s\n",
 		summary.WorkflowRunsStarted,
 		summary.WorkflowRunsCompleted,
 		summary.WorkflowRunsFailed,
@@ -386,4 +428,19 @@ elapsed: %s
 		summary.Elapsed.Round(time.Millisecond),
 	)
 	return err
+}
+
+func writeSummaryOutput(path string, summary loadSummary) error {
+	if path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write summary output %s: %w", path, err)
+	}
+	return nil
 }
