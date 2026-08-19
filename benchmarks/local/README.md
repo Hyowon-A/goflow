@@ -10,3 +10,9 @@ Keep this directory small:
   from private material.
 
 Planned result files live under `results/`.
+
+## Durations
+
+Benchmark commands report p50 and p95 workflow durations from stored workflow
+timestamps. Live Prometheus duration metrics are intentionally skipped until a
+dashboard needs live averages or percentile buckets.
