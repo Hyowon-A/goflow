@@ -1,0 +1,15 @@
+{
+  "tag": "local-scaling-loadcheck-workers-3",
+  "runs_requested": 50,
+  "workers_requested": 3,
+  "workflow_runs_started": 50,
+  "workflow_runs_completed": 50,
+  "workflow_runs_failed": 0,
+  "task_attempts": 200,
+  "retries": 0,
+  "dead_letters": 0,
+  "outbox_pending": 0,
+  "p50_workflow_duration": 1080426500,
+  "p95_workflow_duration": 1109331250,
+  "elapsed": 1506580625
+}
