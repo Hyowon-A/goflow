@@ -271,6 +271,7 @@ values can be provided through `.env`.
 | `WORKER_LEASE_DURATION` | No | `30s` | Time a worker owns a claimed task before it is recoverable. |
 | `WORKER_HEARTBEAT_INTERVAL` | No | `10s` | Interval for extending active task-run leases. Must be shorter than `WORKER_LEASE_DURATION`. |
 | `WORKER_RECOVERY_INTERVAL` | No | `30s` | Interval for recovering expired task-run leases. |
+| `WORKER_METRICS_PORT` | No | Empty | Worker metrics listen port. Empty disables the worker metrics HTTP server. |
 
 The provided `.env.example` points at the local Docker Compose PostgreSQL
 instance on port `5433` and Redis on port `6379`. It also sets `HTTP_PORT=8081`,
@@ -336,8 +337,8 @@ Metrics are exposed by the API process:
 curl -sS "$API/metrics" | rg 'goflow_outbox_pending|goflow_task_runs_running|goflow_worker_lease_recoveries_total'
 ```
 
-The standalone worker command has metric hooks in the worker service, but it
-does not expose its own HTTP metrics endpoint yet.
+When `WORKER_METRICS_PORT` is set, the worker exposes `GET /metrics` and
+`GET /health` on that port.
 
 ## Documentation
 

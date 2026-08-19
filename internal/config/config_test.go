@@ -71,6 +71,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.WorkerRecoveryInterval != 30*time.Second {
 		t.Fatalf("expected default WorkerRecoveryInterval 30s, got %s", cfg.WorkerRecoveryInterval)
 	}
+	if cfg.WorkerMetricsPort != "" {
+		t.Fatalf("expected empty WorkerMetricsPort, got %q", cfg.WorkerMetricsPort)
+	}
 
 	if cfg.Address() != ":8080" {
 		t.Fatalf("expected address :8080, got %q", cfg.Address())
@@ -90,6 +93,7 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("WORKER_LEASE_DURATION", "45s")
 	t.Setenv("WORKER_HEARTBEAT_INTERVAL", "15s")
 	t.Setenv("WORKER_RECOVERY_INTERVAL", "20s")
+	t.Setenv("WORKER_METRICS_PORT", "9091")
 
 	cfg, err := Load()
 	if err != nil {
@@ -139,6 +143,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.WorkerRecoveryInterval != 20*time.Second {
 		t.Fatalf("expected WorkerRecoveryInterval 20s, got %s", cfg.WorkerRecoveryInterval)
+	}
+	if cfg.WorkerMetricsPort != "9091" {
+		t.Fatalf("expected WorkerMetricsPort 9091, got %q", cfg.WorkerMetricsPort)
 	}
 
 	if cfg.Address() != ":9090" {
@@ -192,6 +199,20 @@ func TestLoadRejectsInvalidWorkerQueueSettings(t *testing.T) {
 			_, err := Load()
 			if err == nil {
 				t.Fatal("expected invalid worker queue setting to return an error")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidWorkerMetricsPort(t *testing.T) {
+	for _, value := range []string{"not-a-port", "0", "65536"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/goflow?sslmode=disable")
+			t.Setenv("WORKER_METRICS_PORT", value)
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "WORKER_METRICS_PORT") {
+				t.Fatalf("expected worker metrics port error, got %v", err)
 			}
 		})
 	}

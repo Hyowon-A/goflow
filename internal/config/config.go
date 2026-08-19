@@ -26,6 +26,7 @@ type Config struct {
 	WorkerLeaseDuration     time.Duration
 	WorkerHeartbeatInterval time.Duration
 	WorkerRecoveryInterval  time.Duration
+	WorkerMetricsPort       string
 }
 
 func Load() (Config, error) {
@@ -67,6 +68,7 @@ func Load() (Config, error) {
 		WorkerLeaseDuration:     workerLeaseDuration,
 		WorkerHeartbeatInterval: workerHeartbeatInterval,
 		WorkerRecoveryInterval:  workerRecoveryInterval,
+		WorkerMetricsPort:       getEnv("WORKER_METRICS_PORT", ""),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -83,6 +85,12 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.QueueConsumerGroup) == "" {
 		return Config{}, errors.New("QUEUE_CONSUMER_GROUP is required")
+	}
+	if cfg.WorkerMetricsPort != "" {
+		port, err := strconv.Atoi(cfg.WorkerMetricsPort)
+		if err != nil || port <= 0 || port > 65535 {
+			return Config{}, errors.New("WORKER_METRICS_PORT must be a valid port")
+		}
 	}
 
 	return cfg, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Hyowon-A/goflow/internal/config"
 	"github.com/Hyowon-A/goflow/internal/database"
+	"github.com/Hyowon-A/goflow/internal/metrics"
 	"github.com/Hyowon-A/goflow/internal/queue"
 	"github.com/Hyowon-A/goflow/internal/recallify"
 	"github.com/Hyowon-A/goflow/internal/scheduler"
@@ -70,10 +72,37 @@ func run() error {
 		return err
 	}
 	defer publisher.Close()
-	outboxDispatcher := scheduler.NewOutboxDispatcher(repo, publisher)
-	schedulerService := scheduler.NewService(repo, publisher)
 
-	service := worker.NewService(
+	registry := metrics.NewRegistry()
+	registry.Gauge("goflow_outbox_pending", repo.CountPendingTaskOutboxEvents)
+	registry.Gauge("goflow_task_runs_running", repo.CountRunningTaskRuns)
+	registry.Gauge("goflow_task_runs_expired_leases", repo.CountExpiredRunningTaskRuns)
+
+	outboxDispatcher := scheduler.NewOutboxDispatcherWithMetrics(repo, publisher, registry)
+	schedulerService := scheduler.NewServiceWithMetrics(repo, publisher, registry)
+
+	var metricsServer *http.Server
+	var metricsServerErrors <-chan error
+	if cfg.WorkerMetricsPort != "" {
+		metricsServer = &http.Server{
+			Addr:              ":" + cfg.WorkerMetricsPort,
+			Handler:           workerMetricsHandler(registry),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		serverErrors := make(chan error, 1)
+		metricsServerErrors = serverErrors
+		go func() {
+			log.Printf("starting GoFlow worker metrics on :%s", cfg.WorkerMetricsPort)
+			serverErrors <- metricsServer.ListenAndServe()
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx)
+		}()
+	}
+
+	service := worker.NewServiceWithMetrics(
 		worker.ServiceConfig{
 			WorkerID:          cfg.WorkerID,
 			LeaseDuration:     cfg.WorkerLeaseDuration,
@@ -83,6 +112,7 @@ func run() error {
 		repo,
 		repo,
 		newExecutorRegistry(),
+		registry,
 		schedulerService,
 	)
 	outboxTicker := time.NewTicker(cfg.QueueBlockTimeout)
@@ -113,6 +143,10 @@ func run() error {
 			dispatchOutbox()
 		case <-recoveryTicker.C:
 			recoverExpiredTaskRuns()
+		case err := <-metricsServerErrors:
+			if !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
 		default:
 		}
 
@@ -150,4 +184,13 @@ func newExecutorRegistry() worker.ExecutorRegistry {
 		recallify.ExecutorTypeMergeStudySet:   recallify.RecallifyMergeStudySetExecutor{},
 		recallify.ExecutorTypeNotifyCallback:  recallify.RecallifyNotifyCallbackExecutor{},
 	})
+}
+
+func workerMetricsHandler(registry *metrics.Registry) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", registry.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
 }

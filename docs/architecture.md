@@ -224,9 +224,9 @@ for pending outbox events, running task runs and expired running leases.
 Counters are emitted from workflow-run creation, workflow finalization, task
 attempt and task-run completion, scheduler queueing, outbox publishing and
 publish failures, lease recovery, worker heartbeats, late completion rejection,
-Redis acknowledgement and intentional pending-message decisions. Worker service
-metrics are available when a registry is injected; the standalone `cmd/worker`
-does not expose a separate HTTP metrics endpoint yet.
+Redis acknowledgement and intentional pending-message decisions. The worker
+command exposes `GET /metrics` and `GET /health` when `WORKER_METRICS_PORT` is
+set.
 
 Logs use structured fields for request IDs, workflow IDs, task-run IDs,
 attempt IDs, worker IDs, Redis message IDs, outbox event IDs and stable
