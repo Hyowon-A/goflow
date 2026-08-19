@@ -32,8 +32,11 @@ maintaining durable workflow state and supporting reliable failure recovery.
 - Consistent JSON error responses with request IDs
 - Structured request, idempotency, scheduler and duplicate-message logging
 - Prometheus-style API metrics at `GET /metrics`
+- Optional worker metrics server with `GET /metrics` and `GET /health`
+- Local Prometheus and Grafana dashboard provisioning
 - Local load-check command for a repeatable `A -> B, C -> D` workflow
 - Recallify workflow demo with deterministic and real-backend generation modes
+- Local baseline and scaling benchmark scripts with committed JSON summaries
 - Evidence-based incident report CLI for workflow runs
 - Operations checks for Redis outages, stopped workers, duplicates and retry
   exhaustion
@@ -244,6 +247,18 @@ Run the deterministic Recallify workflow:
 go run ./cmd/recallify -runs 2 -workers 2 -timeout 90s
 ```
 
+Run local benchmark scripts:
+
+```sh
+scripts/local_baseline.sh
+scripts/local_scaling.sh
+```
+
+The scripts start PostgreSQL and Redis with Docker Compose, run loadcheck and
+Recallify fake-mode workloads, write JSON summaries under
+`benchmarks/local/results/`, then stop those services. Current local results
+are summarized in [Local benchmarks](benchmarks/local/README.md).
+
 Inspect a workflow run using PostgreSQL evidence plus optional Redis and API
 metrics context:
 
@@ -353,6 +368,7 @@ Prometheus listens on `http://localhost:9090`. Grafana listens on
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Local benchmarks](benchmarks/local/README.md)
 - [Failure model](docs/failure-model.md)
 - [Operations checks](docs/operations.md)
 - [Recallify workflow](docs/recallify-workflow.md)
@@ -365,8 +381,7 @@ Prometheus listens on `http://localhost:9090`. Grafana listens on
 - Broader idempotency cleanup and retention policy
 - Manual dead-letter replay
 - Periodic due-retry scanning from the worker command
-- Worker-process metrics HTTP endpoint
-- Grafana dashboards
+- Failure benchmark script and benchmark report generator
 
 ## Development Principles
 
