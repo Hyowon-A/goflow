@@ -340,14 +340,15 @@ curl -sS "$API/metrics" | rg 'goflow_outbox_pending|goflow_task_runs_running|gof
 When `WORKER_METRICS_PORT` is set, the worker exposes `GET /metrics` and
 `GET /health` on that port.
 
-Run local Prometheus:
+Run local Prometheus and Grafana:
 
 ```sh
 WORKER_METRICS_PORT=9091 make worker
 make observability-up
 ```
 
-Prometheus listens on `http://localhost:9090`.
+Prometheus listens on `http://localhost:9090`. Grafana listens on
+`http://localhost:3000` and provisions the `GoFlow Local` dashboard.
 
 ## Documentation
 

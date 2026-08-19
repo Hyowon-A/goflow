@@ -27,7 +27,8 @@ redis-up:
 	docker compose up -d redis
 
 observability-up:
-	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus grafana
 
 observability-down:
-	docker compose -f docker-compose.yml -f docker-compose.observability.yml down prometheus
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml stop prometheus grafana
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -f prometheus grafana
